@@ -1,8 +1,12 @@
 # cuda-qr
 
-To run, use:
-
+Make sure that G++10 is installed
 ```
-nvcc benchmark.cu reference_kernels.cu -o benchmark -lcublas -lcurand -lcusolver
+sudo apt install g++-10
+```
+
+To run, use:
+```
+nvcc -ccbin=g++-10 -std=c++20 benchmark.cu reference_kernels.cu -o benchmark -lcublas -lcurand -lcusolver
 ./benchmark
 ```
