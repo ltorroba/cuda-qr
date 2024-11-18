@@ -6,6 +6,7 @@
 #include <iostream>
 #include <chrono>
 #include <cusolverDn.h>
+
 #include "reference_kernels.cuh"
 
 // Add this before main()
@@ -129,11 +130,11 @@ std::tuple<float*, float*, CompactQR> computeQR(cusolverDnHandle_t solver_handle
 }
 
 int main(int argc, char **argv) {
-    const int num_trials = 1000;
+    const int num_trials = 100;
     const int m = 1024;  // matrix height
     const int n = 512;   // matrix width
     const int r = 32;    // rank
-    const int batch_size = 100;  // for matrix X
+    const int batch_size = 10;  // for matrix X
 
     // Initialize CUDA resources
     cublasHandle_t handle;
@@ -158,23 +159,48 @@ int main(int argc, char **argv) {
     float *d_temp;
     cudaMalloc(&d_temp, n * sizeof(float));
 
+    float *d_output_ref, *d_output_matrix_ref;
+    cudaMalloc(&d_output_ref, m * sizeof(float));
+    cudaMalloc(&d_output_matrix_ref, m * batch_size * sizeof(float));
+
     // Benchmark vector multiplication
-    double total_time_vector = 0.0;
+    float total_time_vector = 0.0f;
+    float total_time_vector_ref = 0.0f;
+    float max_error_vector = 0.0f;
+
+    std::cout << "Benchmarking vector multiplication...\n";
     for (int trial = 0; trial < num_trials; trial++) {
         // Generate random low-rank matrix
         auto [d_A, d_U, d_V] = generateRandomLowRankMatrix(handle, gen, m, n, r);
 
         // Compute QR decomposition
         auto [d_Q, d_R, compact] = computeQR(solver_handle, d_A, m, n);
-        
+
         // Generate random vector x
         curandGenerateNormal(gen, d_x, n, 0.0f, 1.0f);
 
-        // Time the vector multiplication
+        // Time the custom implementation
         auto kernel_time = benchmark_kernel([&]() {
             launch_QRx(d_Q, d_R, d_x, d_output, m, n, r);
         });
         total_time_vector += kernel_time;
+
+        // Time the reference implementation
+        auto ref_time = benchmark_kernel([&]() {
+            cublas_ABx(handle, d_Q, d_R, d_x, d_output_ref, d_temp, m, n, r);
+        });
+        total_time_vector_ref += ref_time;
+
+        // Compare results
+        thrust::device_vector<float> custom_result(m);
+        thrust::device_vector<float> ref_result(m);
+        cudaMemcpy(custom_result.data().get(), d_output, m * sizeof(float), cudaMemcpyDeviceToDevice);
+        cudaMemcpy(ref_result.data().get(), d_output_ref, m * sizeof(float), cudaMemcpyDeviceToDevice);
+
+        for (int i = 0; i < m; i++) {
+            float diff = std::abs(custom_result[i] - ref_result[i]);
+            max_error_vector = std::max(max_error_vector, diff);
+        }
 
         cudaFree(d_A);
         cudaFree(d_U);
@@ -182,7 +208,11 @@ int main(int argc, char **argv) {
     }
 
     // Benchmark matrix multiplication
-    double total_time_matrix = 0.0;
+    float total_time_matrix = 0.0f;
+    float total_time_matrix_ref = 0.0f;
+    float max_error_matrix = 0.0f;
+
+    std::cout << "Benchmarking matrix multiplication...\n";
     for (int trial = 0; trial < num_trials; trial++) {
         // Generate random low-rank matrix
         auto [d_A, d_U, d_V] = generateRandomLowRankMatrix(handle, gen, m, n, r);
@@ -193,11 +223,28 @@ int main(int argc, char **argv) {
         // Generate random matrix X
         curandGenerateNormal(gen, d_X, n * batch_size, 0.0f, 1.0f);
 
-        // Time the matrix multiplication
+        // Time the custom implementation
         auto kernel_time = benchmark_kernel([&]() {
             launch_QRX(d_Q, d_R, d_X, d_output_matrix, m, n, r, batch_size);
         });
         total_time_matrix += kernel_time;
+
+        // Time the reference implementation
+        auto ref_time = benchmark_kernel([&]() {
+            cublas_ABX(handle, d_Q, d_R, d_X, d_output_matrix_ref, d_temp, m, n, r, batch_size);
+        });
+        total_time_matrix_ref += ref_time;
+
+        // Compare results
+        thrust::device_vector<float> custom_result(m * batch_size);
+        thrust::device_vector<float> ref_result(m * batch_size);
+        cudaMemcpy(custom_result.data().get(), d_output_matrix, m * batch_size * sizeof(float), cudaMemcpyDeviceToDevice);
+        cudaMemcpy(ref_result.data().get(), d_output_matrix_ref, m * batch_size * sizeof(float), cudaMemcpyDeviceToDevice);
+
+        for (int i = 0; i < m * batch_size; i++) {
+            float diff = std::abs(custom_result[i] - ref_result[i]);
+            max_error_matrix = std::max(max_error_matrix, diff);
+        }
 
         cudaFree(d_A);
         cudaFree(d_U);
@@ -205,8 +252,15 @@ int main(int argc, char **argv) {
     }
 
     // Print results
-    std::cout << "Average time for QRx: " << (total_time_vector / num_trials) * 1000 << " ms\n";
-    std::cout << "Average time for QRX: " << (total_time_matrix / num_trials) * 1000 << " ms\n";
+    std::cout << "Vector Operation Results:\n";
+    std::cout << "  Custom implementation: " << (total_time_vector / num_trials) * 1000 << " ms\n";
+    std::cout << "  cuBLAS implementation: " << (total_time_vector_ref / num_trials) * 1000 << " ms\n";
+    std::cout << "  Maximum error: " << max_error_vector << "\n\n";
+
+    std::cout << "Matrix Operation Results:\n";
+    std::cout << "  Custom implementation: " << (total_time_matrix / num_trials) * 1000 << " ms\n";
+    std::cout << "  cuBLAS implementation: " << (total_time_matrix_ref / num_trials) * 1000 << " ms\n";
+    std::cout << "  Maximum error: " << max_error_matrix << "\n";
 
     // Cleanup
     cudaFree(d_Q);
@@ -216,6 +270,8 @@ int main(int argc, char **argv) {
     cudaFree(d_output);
     cudaFree(d_output_matrix);
     cudaFree(d_temp);
+    cudaFree(d_output_ref);
+    cudaFree(d_output_matrix_ref);
     cublasDestroy(handle);
     curandDestroyGenerator(gen);
     cusolverDnDestroy(solver_handle);
