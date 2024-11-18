@@ -3,6 +3,6 @@
 To run, use:
 
 ```
-nvcc benchmark.cu -o benchmark -lcublas -lcurand -lcusolver
+nvcc benchmark.cu reference_kernels.cu -o benchmark -lcublas -lcurand -lcusolver
 ./benchmark
 ```
