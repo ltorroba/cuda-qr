@@ -8,11 +8,11 @@ __global__ void compute_QRx(const float* Q, const float* R, const float* x, floa
     
     float sum = 0.0f;
     for (int j = 0; j < r; j++) {
-        float Qx = 0.0f;
+        float QR_row_j = 0.0f;
         for (int k = 0; k < n; k++) {
-            Qx += Q[row + k * m] * R[k + j * n];
+            QR_row_j += Q[row + k * m] * R[k + j * n];
         }
-        sum += Qx * x[j];
+        sum += QR_row_j * x[j];
     }
     output[row] = sum;
 }
@@ -26,11 +26,11 @@ __global__ void compute_QRX(const float* Q, const float* R, const float* X, floa
     
     float sum = 0.0f;
     for (int j = 0; j < r; j++) {
-        float Qx = 0.0f;
+        float QR_row_j = 0.0f;
         for (int i = 0; i < n; i++) {
-            Qx += Q[row + i * m] * R[i + j * n];
+            QR_row_j += Q[row + i * m] * R[i + j * n];
         }
-        sum += Qx * X[j + col * r];
+        sum += QR_row_j * X[j + col * r];
     }
     output[row + col * m] = sum;
 }

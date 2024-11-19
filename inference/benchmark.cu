@@ -4,7 +4,9 @@
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
 #include <iostream>
+#include <iomanip>
 #include <chrono>
+#include <functional>
 #include <cusolverDn.h>
 
 #include "reference_kernels.cuh"
@@ -129,6 +131,24 @@ std::tuple<float*, float*, CompactQR> computeQR(cusolverDnHandle_t solver_handle
     return std::make_tuple(d_Q, d_R, std::move(compact));
 }
 
+// Add this before main()
+struct KernelResults {
+    float total_time = 0.0f;
+    float max_error = 0.0f;
+};
+
+// Add this struct definition
+struct KernelPair {
+    std::string name;
+    std::function<void(const float*, const float*, const float*, float*, int, int, int)> qrx_kernel;
+    std::function<void(const float*, const float*, const float*, float*, int, int, int, int)> qrX_kernel;
+    
+    KernelPair(const std::string& n,
+               std::function<void(const float*, const float*, const float*, float*, int, int, int)> x_kernel,
+               std::function<void(const float*, const float*, const float*, float*, int, int, int, int)> X_kernel)
+        : name(n), qrx_kernel(x_kernel), qrX_kernel(X_kernel) {}
+};
+
 int main(int argc, char **argv) {
     const int num_trials = 100;
     const int m = 1024;  // matrix height
@@ -163,12 +183,34 @@ int main(int argc, char **argv) {
     cudaMalloc(&d_output_ref, m * sizeof(float));
     cudaMalloc(&d_output_matrix_ref, m * batch_size * sizeof(float));
 
-    // Benchmark vector multiplication
-    float total_time_vector = 0.0f;
-    float total_time_vector_ref = 0.0f;
-    float max_error_vector = 0.0f;
+    // Allocate temp buffers for cuBLAS
+    float* d_temp_vector;
+    float* d_temp_matrix;
+    cudaMalloc(&d_temp_vector, n * sizeof(float));
+    cudaMalloc(&d_temp_matrix, n * batch_size * sizeof(float));
 
+    // Define all kernel implementations
+    std::vector<KernelPair> kernels = {
+        KernelPair("Custom Implementation", 
+            launch_QRx, 
+            launch_QRX
+        ),
+        KernelPair("cuBLAS with QR input",
+            [handle, d_temp_vector](const float* Q, const float* R, const float* x, float* output, 
+                                  int m, int n, int r) -> void {
+                cublas_ABx(handle, Q, R, x, output, d_temp_vector, m, n, r);
+            },
+            [handle, d_temp_matrix](const float* Q, const float* R, const float* X, float* output,
+                                  int m, int n, int r, int k) -> void {
+                cublas_ABX(handle, Q, R, X, output, d_temp_matrix, m, n, r, k);
+            }
+        )
+    };
+
+    // Benchmark vector multiplication
     std::cout << "Benchmarking vector multiplication...\n";
+    std::vector<KernelResults> vector_results(kernels.size());
+
     for (int trial = 0; trial < num_trials; trial++) {
         // Generate random low-rank matrix
         auto [d_A, d_U, d_V] = generateRandomLowRankMatrix(handle, gen, m, n, r);
@@ -212,6 +254,7 @@ int main(int argc, char **argv) {
     }
     
     // Matrix multiplication benchmark
+    std::cout << "Benchmarking matrix multiplication...\n";
     std::vector<KernelResults> matrix_results(kernels.size());
     
     for (int trial = 0; trial < num_trials; trial++) {
@@ -258,27 +301,27 @@ int main(int argc, char **argv) {
     
     // Print results
     std::cout << "\nVector Operation Results:\n";
-    std::cout << std::string(50, '-') << "\n";
-    std::cout << std::setw(20) << "Implementation" 
+    std::cout << std::string(60, '-') << "\n";
+    std::cout << std::setw(30) << "Implementation" 
               << std::setw(15) << "Time (ms)" 
               << std::setw(15) << "Max Error" << "\n";
-    std::cout << std::string(50, '-') << "\n";
+    std::cout << std::string(60, '-') << "\n";
     
     for (size_t i = 0; i < kernels.size(); i++) {
-        std::cout << std::setw(20) << kernels[i].name 
+        std::cout << std::setw(30) << kernels[i].name 
                   << std::setw(15) << (vector_results[i].total_time / num_trials) / 1000
                   << std::setw(15) << vector_results[i].max_error << "\n";
     }
     
     std::cout << "\nMatrix Operation Results:\n";
-    std::cout << std::string(50, '-') << "\n";
-    std::cout << std::setw(20) << "Implementation" 
+    std::cout << std::string(60, '-') << "\n";
+    std::cout << std::setw(30) << "Implementation" 
               << std::setw(15) << "Time (ms)" 
               << std::setw(15) << "Max Error" << "\n";
-    std::cout << std::string(50, '-') << "\n";
+    std::cout << std::string(60, '-') << "\n";
     
     for (size_t i = 0; i < kernels.size(); i++) {
-        std::cout << std::setw(20) << kernels[i].name 
+        std::cout << std::setw(30) << kernels[i].name 
                   << std::setw(15) << (matrix_results[i].total_time / num_trials) / 1000
                   << std::setw(15) << matrix_results[i].max_error << "\n";
     }
