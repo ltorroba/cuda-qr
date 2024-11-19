@@ -30,7 +30,7 @@ __global__ void compute_QRX(const float* Q, const float* R, const float* X, floa
         for (int i = 0; i < n; i++) {
             Qx += Q[row + i * m] * R[i + j * n];
         }
-        sum += Qx * X[j + col * n];
+        sum += Qx * X[j + col * r];
     }
     output[row + col * m] = sum;
 }
