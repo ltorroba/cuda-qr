@@ -16,7 +16,7 @@ echo "Building the project..."
 
 # Build code.
 # we use --expt-relaxed-constexpr to avoid warning #20013-D (not the best solution)
-nvcc --expt-relaxed-constexpr -O3 --use_fast_math -gencode arch=compute_86,code=[sm_86,compute_86] -o ${CTR_BUILD_DIR}/qr qr_kernels.cu -I/cutlass/include/
+nvcc --expt-relaxed-constexpr -O3 --use_fast_math -gencode arch=compute_86,code=[sm_86,compute_86] -o ${CTR_BUILD_DIR}/qr qr_kernels.cu -lcublas -lcurand -lcusolver
 
 # Upload test generation script.
 cp gen_test_data.py ${CTR_BUILD_DIR}/
