@@ -401,7 +401,7 @@ TestData read_test_data(
         if (data.ref.find({size_i, size_j, size_k}) == data.ref.end()) {
             data.ref[{size_i, size_j, size_k}] = read_data(
                 path_prefix + "ref_" + std::to_string(size_i) + "_" +
-                    std::to_string(size_j) + "x" + std::to_string(size_k) + ".bin",
+                    std::to_string(size_j) + ".bin",
                 size_i * size_j);
         }
     }
@@ -426,31 +426,23 @@ void run_config(
     BenchmarkResults &results) {
     auto size_i = config.size_i;
     auto size_j = config.size_j;
-    auto size_k = config.size_k;
 
     auto const &a = data.a.at({size_i, size_k});
-    auto const &b = data.b.at({size_k, size_j});
-    auto const &c = data.c.at({size_i, size_j, size_k});
+    auto const &ref = data.ref.at({size_i, size_j});
 
     float *a_gpu;
-    float *b_gpu;
-    float *c_gpu;
-    CUDA_CHECK(cudaMalloc(&a_gpu, size_i * size_k * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&b_gpu, size_k * size_j * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&c_gpu, size_i * size_j * sizeof(float)));
+    float *tau_gpu;
+    CUDA_CHECK(cudaMalloc(&a_gpu, size_i * size_j * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&tau_gpu, size_i * size_j * sizeof(float))); // TODO: determine size more accurately
 
     CUDA_CHECK(cudaMemcpy(
         a_gpu,
         a.data(),
-        size_i * size_k * sizeof(float),
-        cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(
-        b_gpu,
-        b.data(),
-        size_k * size_j * sizeof(float),
+        size_i * size_j * sizeof(float),
         cudaMemcpyHostToDevice));
 
-    size_t workspace_size = Impl::get_workspace_size(size_i, size_j, size_k);
+
+    size_t workspace_size = Impl::get_workspace_size(size_i, size_j);
     float *workspace_gpu = nullptr;
     if (workspace_size > 0) {
         CUDA_CHECK(cudaMalloc(&workspace_gpu, workspace_size));
@@ -458,17 +450,17 @@ void run_config(
     }
 
     if (phase == Phase::BENCHMARK) {
-        printf("  %6d  %6d  %6d", size_i, size_j, size_k);
+        printf("  %6d  %6d  ", size_i, size_j);
     } else {
-        printf("  warmup %6d  %6d  %6d", size_i, size_j, size_k);
+        printf("  warmup %6d  %6d", size_i, size_j);
     }
 
-    Impl::run(size_i, size_j, size_k, a_gpu, b_gpu, c_gpu, workspace_gpu);
+    Impl::run(size_i, size_j,  a_gpu, tau_gpu);
 
     std::vector<float> c_out_host(size_i * size_j);
     CUDA_CHECK(cudaMemcpy(
         c_out_host.data(),
-        c_gpu,
+        a_gpu,
         size_i * size_j * sizeof(float),
         cudaMemcpyDeviceToHost));
 
@@ -476,9 +468,9 @@ void run_config(
     double ref_mean_square = 0.0;
     for (int32_t i = 0; i < size_i; ++i) {
         for (int32_t j = 0; j < size_j; ++j) {
-            float diff = c_out_host[i * size_j + j] - c[i * size_j + j];
+            float diff = c_out_host[i * size_j + j] - ref[i * size_j + j];
             mse += diff * diff;
-            ref_mean_square += c[i * size_j + j] * c[i * size_j + j];
+            ref_mean_square += ref[i * size_j + j] * ref[i * size_j + j];
         }
     }
     mse /= size_i * size_j;
@@ -519,8 +511,7 @@ void run_config(
     printf("\n");
 
     CUDA_CHECK(cudaFree(a_gpu));
-    CUDA_CHECK(cudaFree(b_gpu));
-    CUDA_CHECK(cudaFree(c_gpu));
+    CUDA_CHECK(cudaFree(tau_gpu));
     CUDA_CHECK(cudaFree(workspace_gpu));
 }
 
@@ -538,13 +529,11 @@ BenchmarkResults run_all_configs(
             "  %-6s  %-6s  %-6s  %-8s  %-9s  %-7s\n",
             "size_i",
             "size_j",
-            "size_k",
             "RRMSE",
             "time (ms)",
             "TFLOP/s");
         printf(
             "  %-6s  %-6s  %-6s  %-8s  %-9s  %-7s\n",
-            "------",
             "------",
             "------",
             "--------",
@@ -563,7 +552,7 @@ BenchmarkResults run_all_configs(
 struct QRbase {
     constexpr static char const *name = "qr_base";
 
-    static size_t get_workspace_size(int32_t size_i, int32_t size_j, int32_t size_k) {
+    static size_t get_workspace_size(int32_t size_i, int32_t size_j) {
         return 0;
     }
 
@@ -593,11 +582,7 @@ std::vector<BenchmarkResults> run_all_impls(
     TestData const &data,
     std::vector<BenchmarkConfig> const &configs) {
     auto results = std::vector<BenchmarkResults>{};
-#ifdef HAS_LAB_4_BASELINE_IMPL
-    results.push_back(run_all_configs<MatmulL1Reg>(phase, data, configs));
-#endif
-    results.push_back(run_all_configs<MatmulImproved>(phase, data, configs));
-    results.push_back(run_all_configs<MatmulImprovedReduce>(phase, data, configs));
+    results.push_back(run_all_configs<QRbase>(phase, data, configs));
     return results;
 }
 
@@ -642,9 +627,11 @@ int main(int argc, char **argv) {
         test_data_dir = c_str_test_data_dir;
     }
 
-    auto configs = std::vector<BenchmarkConfig>{
-        {2048},
+    auto configs_test = std::vector<BenchmarkConfig>{
+        {{32,32}, {32,64},  {64,32}, {64,64}},
     };
+
+    
     auto data = read_test_data(test_data_dir, configs);
     run_all_impls(Phase::WARMUP, data, configs);
     auto results = run_all_impls(Phase::BENCHMARK, data, configs);
@@ -676,6 +663,10 @@ int main(int argc, char **argv) {
     }
 
     write_json_results("out/results.json", results);
+
+    /*auto configs_bench = std::vector<BenchmarkConfig>{
+        {{32,32}, {128,128},  {512,512}, {2048,2048}},
+    };*/
 
     return 0;
 }
