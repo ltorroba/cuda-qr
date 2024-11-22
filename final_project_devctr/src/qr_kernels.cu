@@ -72,11 +72,13 @@ __global__ void base_applyQt_singletile( //aplies Qt (given by householder refle
     __shared__ float outs[tilesize][tilesize];
     __shared__ float Qs[tilesize][tilesize];
     __shared__ float cache[tilesize][numthreads];
+    int diagstartidx=diag_iter*tilesize;
+    int tileoffset=(1+g)*tilesize;
     
     
     for (int l=j;l<tilesize;l+=numthreads){
-        outs[i][l]=out[(i+diag_iter*tilesize)*size_in+l+(g+diag_iter+1)*tilesize];
-        Qs[i][l]=out[(i+diag_iter*tilesize)*size_in+l];
+        outs[i][l]=out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset];
+        Qs[i][l]=out[(i+diagstartidx)*size_in+l+diagstartidx];
     }
 
     __syncthreads();
@@ -92,7 +94,7 @@ __global__ void base_applyQt_singletile( //aplies Qt (given by householder refle
         for (int l=0;l<numthreads;l++){
             tmp_sum+=cache[i][l];
         }
-        tmp_sum*=tau[k];
+        tmp_sum*=tau[(diag_iter)*size_in+k];
         for (int l=k+j+1;l<tilesize;l+=numthreads){
             outs[l][i]-=tmp_sum*Qs[l][k];
         }
@@ -103,7 +105,7 @@ __global__ void base_applyQt_singletile( //aplies Qt (given by householder refle
     }
 
     for (int l=j;l<tilesize;l+=numthreads){
-        out[(i+diag_iter*tilesize)*size_in+l+(g+diag_iter)*tilesize]=outs[i][l];
+        out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset]=outs[i][l];
     }
 }
 
@@ -119,12 +121,15 @@ __global__ void base_applyQt_doubletile( //aplies Qt (given by householder refle
     __shared__ float outs[2*tilesize][tilesize];
     __shared__ float Qs[tilesize][tilesize];
     __shared__ float cache[tilesize][numthreads];
+    int diagstartidx=diag_iter*tilesize;
+    int tileoffset=(1+g)*tilesize;
+    int iteroffset=row_iter*tilesize;
     
     
     for (int l=j;l<tilesize;l+=numthreads){
-        outs[i][l]=out[(i+(diag_iter)*tilesize)*size_in+l+(g+diag_iter+1)*tilesize];
-        outs[i+tilesize][l]=out[(i+(diag_iter+row_iter)*tilesize)*size_in+l+(g+diag_iter+1)*tilesize];
-        Qs[i][l]=out[(i+(diag_iter+row_iter)*tilesize)*size_in+l];
+        outs[i][l]=out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset];
+        outs[i+tilesize][l]=out[(i+diagstartidx+iteroffset)*size_in+l+diagstartidx+tileoffset];
+        Qs[i][l]=out[(i+diagstartidx+iteroffset)*size_in+l+diagstartidx+iteroffset];
     }
 
     __syncthreads();
@@ -140,7 +145,7 @@ __global__ void base_applyQt_doubletile( //aplies Qt (given by householder refle
         for (int l=0;l<numthreads;l++){
             tmp_sum+=cache[i][l];
         }
-        tmp_sum*=tau[k];
+        tmp_sum*=tau[(diag_iter)*size_in+row_iter*tilesize+k];
         if (j==0){
             outs[k][i]-=tmp_sum;
         }
@@ -152,8 +157,8 @@ __global__ void base_applyQt_doubletile( //aplies Qt (given by householder refle
     }
 
     for (int l=j;l<tilesize;l+=numthreads){
-        out[(i+(diag_iter)*tilesize)*size_in+l+(g+diag_iter+1)*tilesize]=outs[i][l];
-        out[(i+(diag_iter+row_iter)*tilesize)*size_in+l+(g+diag_iter+1)*tilesize]=outs[i+tilesize][l];
+        out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset]=outs[i][l];
+        out[(i+diagstartidx+iteroffset)*size_in+l+diagstartidx+tileoffset]=outs[i+tilesize][l];
     }
 }
 //-------------------- calculate QR kernels-----------------------------------
@@ -169,10 +174,12 @@ __global__ void base_calcQR_singletile( //calculates in-place QR of diagonal til
     __shared__ float outs[tilesize][tilesize];
     __shared__ float cache[tilesize];
     __shared__ float tauvals[2];
+    int diagstartidx=diag_iter*tilesize;
 
-    outs[i][j]=out[(i+diag_iter*tilesize)*size_in+j];
+    outs[i][j]=out[(i+diagstartidx)*size_in+j+diagstartidx];
+    __syncthreads();
 
-    for(int iter=0;iter<N-1;iter++){
+    for(int iter=0;iter<tilesize-1;iter++){
         if (i>iter && j==iter){
             cache[i]=outs[i][iter]*outs[i][iter];
         }
@@ -182,8 +189,8 @@ __global__ void base_calcQR_singletile( //calculates in-place QR of diagonal til
             for (int l=iter;l<tilesize;l++){
                 tmp_sum+=cache[l];
             }
-            tmp_sum2=sqrt(tmp_sum+outs[iter][iter]*outs[iter][iter]);
-            newvalue=outs[iter][iter];
+            float tmp_sum2=sqrt(tmp_sum+outs[iter][iter]*outs[iter][iter]);
+            float newvalue=outs[iter][iter];
             if (newvalue>0){
                 newvalue+=tmp_sum2;
             }else{
@@ -192,19 +199,19 @@ __global__ void base_calcQR_singletile( //calculates in-place QR of diagonal til
             tmp_sum2=sqrt(tmp_sum+newvalue*newvalue);
             tauvals[0]=2 * (newvalue/tmp_sum2)*(newvalue/tmp_sum2);
             tauvals[1]= newvalue;
-            tau[iter]=tauvals[0];
+            tau[(diag_iter)*size_in+iter]=tauvals[0];
         }
+        float tmp_sum=0.0f;
         if (j>=iter && i>=iter){
-            float tmp_sum=0.0f;
             for (int k=iter;k>tilesize;k++){
                 tmp_sum+=outs[k][iter]*outs[k][j];
             }
         }
         float tileiterj=outs[iter][j];
-        float tileiteri = tile[i][iter];
+        float tileiiter = outs[i][iter];
         __syncthreads();
         if (j>=iter && i>=iter){
-            float tmp_sum = (tmp_sum / tauvals[1]+tileiterj)*tauvals[0];
+            tmp_sum = (tmp_sum / tauvals[1]+tileiterj)*tauvals[0];
             tileiiter/=tauvals[1];
 
             if (j==iter && i>iter){
@@ -217,13 +224,13 @@ __global__ void base_calcQR_singletile( //calculates in-place QR of diagonal til
 
         }
         __syncthreads();
-        out[(i+diag_iter*tilesize)*size_in+j]=outs[i][j];
+        out[(i+diagstartidx)*size_in+j+diagstartidx]=outs[i][j];
 
     }
 
 }
 
-__global__ void base_calcQR_singletile( //calculates in-place QR of diagonal tile combined with row_idx tile below
+__global__ void base_calcQR_doubletile( //calculates in-place QR of diagonal tile combined with row_idx tile below
     int size_in,
     int diag_iter,
     int row_iter,
@@ -234,11 +241,13 @@ __global__ void base_calcQR_singletile( //calculates in-place QR of diagonal til
     __shared__ float outs[2*tilesize][tilesize];
     __shared__ float cache[2*tilesize];
     __shared__ float tauvals[2];
+    int diagstartidx=diag_iter*tilesize;
+    int iteroffset=row_iter*tilesize;
 
-    outs[i][j]=out[(i+diag_iter*tilesize)*size_in+j];
-    outs[i+tilesize][j]=out[(i+(diag_iter+row_iter)*tilesize)*size_in+j];
+    outs[i][j]=out[(i+diagstartidx)*size_in+j+diagstartidx];
+    outs[i+tilesize][j]=out[(i+diagstartidx+iteroffset)*size_in+j+diagstartidx];
 
-    for(int iter=0;iter<N;iter++){
+    for(int iter=0;iter<tilesize;iter++){
         if (j==iter){
             cache[i]=outs[i+tilesize][iter]*outs[i+tilesize][iter];
         }
@@ -248,8 +257,8 @@ __global__ void base_calcQR_singletile( //calculates in-place QR of diagonal til
             for (int l=0;l<tilesize;l++){
                 tmp_sum+=cache[l];
             }
-            tmp_sum2=sqrt(tmp_sum+outs[iter][iter]*outs[iter][iter]);
-            newvalue=outs[iter][iter];
+            float tmp_sum2=sqrt(tmp_sum+outs[iter][iter]*outs[iter][iter]);
+            float newvalue=outs[iter][iter];
             if (newvalue>0){
                 newvalue+=tmp_sum2;
             }else{
@@ -258,10 +267,10 @@ __global__ void base_calcQR_singletile( //calculates in-place QR of diagonal til
             tmp_sum2=sqrt(tmp_sum+newvalue*newvalue);
             tauvals[0]=2 * (newvalue/tmp_sum2)*(newvalue/tmp_sum2);
             tauvals[1]= newvalue;
-            tau[iter]=tauvals[0];
+            tau[(diag_iter)*size_in+row_iter*tilesize+iter]=tauvals[0];
         }
         float tileiterj=outs[iter][j];
-        float tileiiteri = tile[i+tilesize][iter];
+        float tileiiter = outs[i+tilesize][iter];
         if (j>=iter){
             float tmp_sum=0.0f;
             for (int k=tilesize;k>tilesize*2;k++){
@@ -272,7 +281,7 @@ __global__ void base_calcQR_singletile( //calculates in-place QR of diagonal til
         if (j>=iter){
             float tmp_sum = ( tauvals[1]*tileiterj);
             if (i==iter){
-                outs[i][j]-=tauiterj*tauvals[0];
+                outs[i][j]-=tileiterj*tauvals[0];
             }
             if(j>iter){
                 outs[i+tilesize][j]-=tileiiter*tmp_sum * tauvals[0]/tauvals[1]/tauvals[1];
@@ -283,8 +292,8 @@ __global__ void base_calcQR_singletile( //calculates in-place QR of diagonal til
             outs[i+tilesize][iter]=tileiiter / tauvals[1];
         }
         __syncthreads();
-        out[(i+diag_iter*tilesize)*size_in+j]=outs[i][j];
-        out[(i+(diag_iter+row_iter)*tilesize)*size_in+j]=outs[i+tilesize][j];
+        out[(i+diagstartidx)*size_in+j+diagstartidx]=outs[i][j];
+        out[(i+diagstartidx+iteroffset)*size_in+j+diagstartidx]=outs[i+tilesize][j];
 
 
     }
@@ -319,7 +328,7 @@ void launch_tiled_qr(
         int32_t size_i,
         float *a, float *tau) {
 
-        base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,*tau,out); 
+        base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,tau,a); 
     
     
         }
@@ -328,17 +337,41 @@ void launch_tiled_qr(
         int32_t size_i,
         float *a, float *tau) {
 
-            base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,tau,out); 
-            base_applyQt_singletile<<<1,dim3(tilesize,numthreads)>>>(size_i,0,tau,out); 
+            base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,tau,a); 
+            base_applyQt_singletile<<<1,dim3(tilesize,numthreads)>>>(size_i,0,tau,a); 
 
 
     
         }
-
+        void test_qrkernel_double(
+            int32_t size_i,
+            float *a, float *tau) {
+    
+            base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,tau,a); 
+            base_calcQR_doubletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,1,tau,a); 
+        
+        
+            }
+    
+        void test_mulqtkernel_double(
+            int32_t size_i,
+            float *a, float *tau) {
+    
+                base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,tau,a); 
+                base_applyQt_singletile<<<1,dim3(tilesize,numthreads)>>>(size_i,0,tau,a); 
+                base_calcQR_doubletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,1,tau,a);
+                base_applyQt_doubletile<<<1,dim3(tilesize,numthreads)>>>(size_i,0,1,tau,a); 
+    
+        
+            }
         
 
 
 };
+
+////////////////////////////////////////////////////////////////////////////////
+
+
 
 std::vector<float> read_data(std::string const &path, int32_t size) {
     std::ifstream file(path, std::ios::binary);
@@ -398,8 +431,8 @@ TestData read_test_data(
                 size_i * size_j);
         }
 
-        if (data.ref.find({size_i, size_j, size_k}) == data.ref.end()) {
-            data.ref[{size_i, size_j, size_k}] = read_data(
+        if (data.ref.find({size_i, size_j}) == data.ref.end()) {
+            data.ref[{size_i, size_j}] = read_data(
                 path_prefix + "ref_" + std::to_string(size_i) + "_" +
                     std::to_string(size_j) + ".bin",
                 size_i * size_j);
@@ -410,10 +443,11 @@ TestData read_test_data(
 
 struct BenchmarkResults {
     char const *name;
-    std::map<std::tuple<int32_t, int32_t, int32_t>, double> elapsed_ms;
+    std::map<std::tuple<int32_t, int32_t>, double> elapsed_ms;
 };
 
 enum class Phase {
+    TEST,
     WARMUP,
     BENCHMARK,
 };
@@ -427,7 +461,7 @@ void run_config(
     auto size_i = config.size_i;
     auto size_j = config.size_j;
 
-    auto const &a = data.a.at({size_i, size_k});
+    auto const &a = data.a.at({size_i, size_j});
     auto const &ref = data.ref.at({size_i, size_j});
 
     float *a_gpu;
@@ -455,7 +489,20 @@ void run_config(
         printf("  warmup %6d  %6d", size_i, size_j);
     }
 
-    Impl::run(size_i, size_j,  a_gpu, tau_gpu);
+    if (phase == Phase::TEST){
+        if(size_i==32 && size_j==32){
+            Impl::testqr(size_i, a_gpu, tau_gpu);
+        }else if (size_i==32){
+            Impl::testmulq(size_i, a_gpu, tau_gpu);
+        }else if (size_j==32){
+            Impl::testqr2(size_i, a_gpu, tau_gpu);
+        }else{
+            Impl::testmulq2(size_i, a_gpu, tau_gpu);
+        }
+
+    }else{
+        Impl::run(size_i,   a_gpu, tau_gpu);
+    }
 
     std::vector<float> c_out_host(size_i * size_j);
     CUDA_CHECK(cudaMemcpy(
@@ -478,8 +525,8 @@ void run_config(
     float rmse = std::sqrt(mse);
     float rel_rmse = rmse / std::sqrt(ref_mean_square);
 
-    if (phase == Phase::BENCHMARK) {
-        printf("  %8.02e", rel_rmse);
+    if (phase == Phase::BENCHMARK || phase == Phase::TEST ) {
+        printf("rmse:  %8.02e", rel_rmse);
     }
 
     if (rel_rmse > 1e-5) {
@@ -497,14 +544,12 @@ void run_config(
                 }
             },
             [&]() {
-                Impl::run(size_i, size_j, size_k, a_gpu, b_gpu, c_gpu, workspace_gpu);
+                Impl::run(size_i,  a_gpu, tau_gpu);
             });
 
         if (phase == Phase::BENCHMARK) {
-            double tflop = 2.0 * size_i * size_k * size_j * 1e-12;
-            printf("  %9.02f  %7.02f", elapsed_ms, tflop / (elapsed_ms * 1e-3));
 
-            results.elapsed_ms[{size_i, size_j, size_k}] = elapsed_ms;
+            results.elapsed_ms[{size_i, size_j}] = elapsed_ms;
         }
     }
 
@@ -523,17 +568,19 @@ BenchmarkResults run_all_configs(
     auto results = BenchmarkResults{Impl::name};
     if (phase == Phase::WARMUP) {
         printf("warmup %s:\n\n", Impl::name);
-    } else {
+    } else if (phase == Phase::TEST){
+        printf("testing %s:\n\n", Impl::name);
+    }else {
         printf("%s:\n\n", Impl::name);
         printf(
-            "  %-6s  %-6s  %-6s  %-8s  %-9s  %-7s\n",
+            "  %-6s  %-6s   %-8s  %-9s  %-7s\n",
             "size_i",
             "size_j",
             "RRMSE",
             "time (ms)",
             "TFLOP/s");
         printf(
-            "  %-6s  %-6s  %-6s  %-8s  %-9s  %-7s\n",
+            "  %-6s  %-6s  %-8s  %-9s  %-7s\n",
             "------",
             "------",
             "--------",
@@ -558,7 +605,7 @@ struct QRbase {
 
     static void
     run(int32_t size_i,
-        float *a) {
+        float *a, float *tau) {
         qr_base::launch_tiled_qr(size_i,a, tau) ;
     }
 
@@ -570,6 +617,17 @@ struct QRbase {
 
     static void
     testmulq(int32_t size_i,
+        float *a, float *tau) {
+        qr_base::test_mulqtkernel_single(size_i,a, tau) ;
+    }
+    static void
+    testqr2(int32_t size_i,
+        float *a, float *tau) {
+        qr_base::test_qrkernel_single(size_i,a, tau) ;
+    }
+
+    static void
+    testmulq2(int32_t size_i,
         float *a, float *tau) {
         qr_base::test_mulqtkernel_single(size_i,a, tau) ;
     }
@@ -596,13 +654,12 @@ void write_json_results(
         file << "  \"" << result.name << "\": [\n";
         int32_t j = 0;
         for (auto const &[config, elapsed_ms] : result.elapsed_ms) {
-            auto [size_i, size_j, size_k] = config;
-            double tflop = 2.0 * size_i * size_k * size_j * 1e-12;
+            auto [size_i, size_j] = config;
+            double tflop = 2.0 * size_i * size_j * 1e-12;
             double tflop_per_sec = tflop / (elapsed_ms * 1e-3);
             file << "    {\n";
             file << "      \"size_i\": " << size_i << ",\n";
             file << "      \"size_j\": " << size_j << ",\n";
-            file << "      \"size_k\": " << size_k << ",\n";
             file << "      \"elapsed_ms\": " << elapsed_ms << ",\n";
             file << "      \"tflop_per_sec\": " << tflop_per_sec << "\n";
             file << "    }";
@@ -632,8 +689,10 @@ int main(int argc, char **argv) {
     };
 
     
-    auto data = read_test_data(test_data_dir, configs);
-    run_all_impls(Phase::WARMUP, data, configs);
+    auto data = read_test_data(test_data_dir, configs_test);
+    run_all_impls(Phase::TEST, data, configs_test);
+    
+    /*run_all_impls(Phase::WARMUP, data, configs);
     auto results = run_all_impls(Phase::BENCHMARK, data, configs);
 
     for (int32_t j = 1; j < results.size(); ++j) {
@@ -660,9 +719,10 @@ int main(int argc, char **argv) {
                 printf("\n");
             }
         }
-    }
+            
+    }*/
 
-    write_json_results("out/results.json", results);
+    //write_json_results("out/results.json", results);
 
     /*auto configs_bench = std::vector<BenchmarkConfig>{
         {{32,32}, {128,128},  {512,512}, {2048,2048}},
