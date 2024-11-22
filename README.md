@@ -22,11 +22,14 @@ The QR kernels sorurce code can be found in /final_project_devctr/src/qr_kernels
 ### Docker build
 
 To test the docker build (based on https://github.com/accelerated-computing-class/final_project_devctr):
-
+Execute once:
 ```
 ./devtool build_devctr
+```
+Execute every change into src files:
+```
 ./devtool build_project
-py <path_to_telerun.py> submit build/build.tar
+py <path_to_telerun.py> submit build.tar
 ```
 
-This will build a docker environment according to the /final_project_devctr/Dockerfile, build a tar file according to /final_project_devctr/src/build.sh and execute the /final_project_devctr/src/run.sh on telerun.
+This will build a docker environment according to the /devctr/Dockerfile, build a tar file according to /src/build.sh and execute the /src/run.sh on telerun.
