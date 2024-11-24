@@ -33,3 +33,12 @@ py <path_to_telerun.py> submit build.tar
 ```
 
 This will build a docker environment according to the /devctr/Dockerfile, build a tar file according to /src/build.sh and execute the /src/run.sh on telerun.
+
+## To run project locally
+
+```
+cd src
+./build_local.sh
+cd build
+../run.sh
+```

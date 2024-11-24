@@ -6,3 +6,4 @@
 *.fatbin
 
 benchmark
+src/build/
