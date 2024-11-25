@@ -38,7 +38,8 @@ struct QtKernel {
 int main(int argc, char **argv) {
     const int num_trials = 1;
     const int size_in = 256;  // matrix size
-    const int tilesize = 32;  // tile size
+    constexpr int tilesize = 32;  // tile size
+    constexpr int numthreads = 32;  // compile-time constant
     
     // Initialize CUDA resources
     cusolverDnHandle_t solver_handle;
@@ -52,14 +53,14 @@ int main(int argc, char **argv) {
 
     // Define kernel implementations
     std::vector<QtKernel> kernels = {
-        // QtKernel("Original Implementation",
-        //     [](int size_in, int diag_iter, const float* tau, float* matrix) {
-        //         dim3 block(32);  // assuming tilesize=32
-        //         dim3 grid((size_in - diag_iter * tilesize) / tilesize - 1);
-        //         base_applyQt_singletile<tilesize, 32><<<grid, block>>>(size_in, diag_iter, tau, matrix);
-        //         CHECK_CUDA(cudaDeviceSynchronize());
-        //     }
-        // ),
+        QtKernel("Original Implementation",
+            [](int size_in, int diag_iter, const float* tau, float* matrix) {
+                dim3 block(tilesize);
+                dim3 grid((size_in - diag_iter * tilesize) / tilesize - 1);
+                base_applyQt_singletile<tilesize, numthreads><<<grid, block>>>(size_in, diag_iter, tau, matrix);
+                CHECK_CUDA(cudaDeviceSynchronize());
+            }
+        ),
         QtKernel("Reference Implementation",
             reference_applyQt
         )

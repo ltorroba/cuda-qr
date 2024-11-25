@@ -11,7 +11,7 @@ __global__ void base_applyQt_singletile( //aplies Qt (given by householder refle
     float *out) {
     int g = blockIdx.x;
     int i = threadIdx.x;
-    int j = threadIdx.x;
+    int j = threadIdx.y;
     __shared__ float outs[tilesize][tilesize];
     __shared__ float Qs[tilesize][tilesize];
     __shared__ float cache[tilesize][numthreads];
@@ -23,12 +23,13 @@ __global__ void base_applyQt_singletile( //aplies Qt (given by householder refle
         outs[i][l]=out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset];
         Qs[i][l]=out[(i+diagstartidx)*size_in+l+diagstartidx];
     }
+    
 
     __syncthreads();
 
     for (int k=0;k<tilesize-1;k++){
         float tmp_sum = 0.0f;
-        for (int l=k+j;l<tilesize;l+=numthreads){
+        for (int l=k+j+1;l<tilesize;l+=numthreads){
             tmp_sum+= Qs[l][k]*outs[l][i];
         }
         cache[i][j]=tmp_sum;
@@ -143,3 +144,9 @@ void reference_applyQt(int size_in, int diag_iter, const float* tau, float* matr
     CHECK_CUDA(cudaFree(householder_vectors));
     CHECK_CUSOLVER(cusolverDnDestroy(handle));
 }
+
+// After all the other code, add this explicit instantiation:
+template __global__ void base_applyQt_singletile<32, 32>(int size_in, 
+                                                        int diag_iter, 
+                                                        const float* tau, 
+                                                        float* out);
