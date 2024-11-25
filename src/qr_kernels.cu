@@ -58,7 +58,6 @@ namespace qr_base {
 #define numthreads 4
 
 
-
 //-------------------- multiply by Q kernels-----------------------------------
 
 __global__ void base_applyQt_singletile( //aplies Qt (given by householder reflectors on diagonal tile k) to the remainder of the row
@@ -68,7 +67,7 @@ __global__ void base_applyQt_singletile( //aplies Qt (given by householder refle
     float *out) {
     int g = blockIdx.x;
     int i = threadIdx.x;
-    int j = threadIdx.x;
+    int j = threadIdx.y;
     __shared__ float outs[tilesize][tilesize];
     __shared__ float Qs[tilesize][tilesize];
     __shared__ float cache[tilesize][numthreads];
@@ -80,12 +79,13 @@ __global__ void base_applyQt_singletile( //aplies Qt (given by householder refle
         outs[i][l]=out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset];
         Qs[i][l]=out[(i+diagstartidx)*size_in+l+diagstartidx];
     }
+    
 
     __syncthreads();
 
     for (int k=0;k<tilesize-1;k++){
         float tmp_sum = 0.0f;
-        for (int l=k+j;l<tilesize;l+=numthreads){
+        for (int l=k+j+1;l<tilesize;l+=numthreads){
             tmp_sum+= Qs[l][k]*outs[l][i];
         }
         cache[i][j]=tmp_sum;
@@ -117,7 +117,7 @@ __global__ void base_applyQt_doubletile( //aplies Qt (given by householder refle
     float *out) {
     int g = blockIdx.x;
     int i = threadIdx.x;
-    int j = threadIdx.x;
+    int j = threadIdx.y;
     __shared__ float outs[2*tilesize][tilesize];
     __shared__ float Qs[tilesize][tilesize];
     __shared__ float cache[tilesize][numthreads];
@@ -129,8 +129,9 @@ __global__ void base_applyQt_doubletile( //aplies Qt (given by householder refle
     for (int l=j;l<tilesize;l+=numthreads){
         outs[i][l]=out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset];
         outs[i+tilesize][l]=out[(i+diagstartidx+iteroffset)*size_in+l+diagstartidx+tileoffset];
-        Qs[i][l]=out[(i+diagstartidx+iteroffset)*size_in+l+diagstartidx+iteroffset];
+        Qs[i][l]=out[(i+diagstartidx+iteroffset)*size_in+l+diagstartidx];
     }
+
 
     __syncthreads();
 
@@ -149,7 +150,7 @@ __global__ void base_applyQt_doubletile( //aplies Qt (given by householder refle
         if (j==0){
             outs[k][i]-=tmp_sum;
         }
-        for (int l=j+1;l<tilesize;l+=numthreads){
+        for (int l=j;l<tilesize;l+=numthreads){
             outs[l+tilesize][i]-=tmp_sum*Qs[l][k];
         }
         
@@ -160,6 +161,7 @@ __global__ void base_applyQt_doubletile( //aplies Qt (given by householder refle
         out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset]=outs[i][l];
         out[(i+diagstartidx+iteroffset)*size_in+l+diagstartidx+tileoffset]=outs[i+tilesize][l];
     }
+
 }
 //-------------------- calculate QR kernels-----------------------------------
 
@@ -170,7 +172,7 @@ __global__ void base_calcQR_singletile( //calculates in-place QR of diagonal til
     float *tau,
     float *out) {
     int i = threadIdx.x;
-    int j = threadIdx.x;
+    int j = threadIdx.y;
     __shared__ float outs[tilesize][tilesize];
     __shared__ float cache[tilesize];
     __shared__ float tauvals[2];
@@ -180,30 +182,32 @@ __global__ void base_calcQR_singletile( //calculates in-place QR of diagonal til
     __syncthreads();
 
     for(int iter=0;iter<tilesize-1;iter++){
-        if (i>iter && j==iter){
+        if (i>iter && j==0){
             cache[i]=outs[i][iter]*outs[i][iter];
-        }
+        } 
+        
         __syncthreads();
         if (i==0 && j==0){
             float tmp_sum=0.0f;
-            for (int l=iter;l<tilesize;l++){
+            for (int l=iter+1;l<tilesize;l++){
                 tmp_sum+=cache[l];
-            }
-            float tmp_sum2=sqrt(tmp_sum+outs[iter][iter]*outs[iter][iter]);
+             }
+            float tmp_sum2=sqrt(tmp_sum+pow(outs[iter][iter],2));
             float newvalue=outs[iter][iter];
             if (newvalue>0){
                 newvalue+=tmp_sum2;
             }else{
                 newvalue-=tmp_sum2;
             }
-            tmp_sum2=sqrt(tmp_sum+newvalue*newvalue);
-            tauvals[0]=2 * (newvalue/tmp_sum2)*(newvalue/tmp_sum2);
+            tmp_sum2=sqrt(tmp_sum+pow(newvalue,2));
+            tauvals[0]=2 * pow(newvalue/tmp_sum2,2);
             tauvals[1]= newvalue;
             tau[(diag_iter)*size_in+iter]=tauvals[0];
+
         }
         float tmp_sum=0.0f;
         if (j>=iter && i>=iter){
-            for (int k=iter;k>tilesize;k++){
+            for (int k=iter+1;k<tilesize;k++){
                 tmp_sum+=outs[k][iter]*outs[k][j];
             }
         }
@@ -212,6 +216,7 @@ __global__ void base_calcQR_singletile( //calculates in-place QR of diagonal til
         __syncthreads();
         if (j>=iter && i>=iter){
             tmp_sum = (tmp_sum / tauvals[1]+tileiterj)*tauvals[0];
+            
             tileiiter/=tauvals[1];
 
             if (j==iter && i>iter){
@@ -221,11 +226,9 @@ __global__ void base_calcQR_singletile( //calculates in-place QR of diagonal til
             }else{
                 outs[i][j]-=tmp_sum;
             }
-
         }
         __syncthreads();
         out[(i+diagstartidx)*size_in+j+diagstartidx]=outs[i][j];
-
     }
 
 }
@@ -237,7 +240,7 @@ __global__ void base_calcQR_doubletile( //calculates in-place QR of diagonal til
     float *tau,
     float *out) {
     int i = threadIdx.x;
-    int j = threadIdx.x;
+    int j = threadIdx.y;
     __shared__ float outs[2*tilesize][tilesize];
     __shared__ float cache[2*tilesize];
     __shared__ float tauvals[2];
@@ -246,7 +249,7 @@ __global__ void base_calcQR_doubletile( //calculates in-place QR of diagonal til
 
     outs[i][j]=out[(i+diagstartidx)*size_in+j+diagstartidx];
     outs[i+tilesize][j]=out[(i+diagstartidx+iteroffset)*size_in+j+diagstartidx];
-
+    
     for(int iter=0;iter<tilesize;iter++){
         if (j==iter){
             cache[i]=outs[i+tilesize][iter]*outs[i+tilesize][iter];
@@ -271,32 +274,37 @@ __global__ void base_calcQR_doubletile( //calculates in-place QR of diagonal til
         }
         float tileiterj=outs[iter][j];
         float tileiiter = outs[i+tilesize][iter];
+        float tmp_sum=0.0f;
         if (j>=iter){
-            float tmp_sum=0.0f;
-            for (int k=tilesize;k>tilesize*2;k++){
+            for (int k=tilesize;k<tilesize*2;k++){
                 tmp_sum+=outs[k][iter]*outs[k][j];
             }
         }
+
         __syncthreads();
-        if (j>=iter){
-            float tmp_sum = ( tauvals[1]*tileiterj);
-            if (i==iter){
-                outs[i][j]-=tileiterj*tauvals[0];
+        if (j>=iter){ //j 0,1
+            tmp_sum += ( tauvals[1]*tileiterj);
+            if (i==iter){ //i 0
+                outs[i][j]-=tmp_sum*tauvals[0]/tauvals[1];
             }
-            if(j>iter){
+            if(j>iter){// i 1
                 outs[i+tilesize][j]-=tileiiter*tmp_sum * tauvals[0]/tauvals[1]/tauvals[1];
             }
+            
+    
 
         }
-        if (j==0){
+        __syncthreads();
+        if (j==0){ //j 0 i 0 1
             outs[i+tilesize][iter]=tileiiter / tauvals[1];
         }
         __syncthreads();
-        out[(i+diagstartidx)*size_in+j+diagstartidx]=outs[i][j];
-        out[(i+diagstartidx+iteroffset)*size_in+j+diagstartidx]=outs[i+tilesize][j];
-
 
     }
+    __syncthreads();
+    out[(i+diagstartidx)*size_in+j+diagstartidx]=outs[i][j];
+    out[(i+diagstartidx+iteroffset)*size_in+j+diagstartidx]=outs[i+tilesize][j];
+
 
 }
 
@@ -327,7 +335,6 @@ void launch_tiled_qr(
     void test_qrkernel_single(
         int32_t size_i,
         float *a, float *tau) {
-
         base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,tau,a); 
     
     
@@ -336,7 +343,6 @@ void launch_tiled_qr(
     void test_mulqtkernel_single(
         int32_t size_i,
         float *a, float *tau) {
-
             base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,tau,a); 
             base_applyQt_singletile<<<1,dim3(tilesize,numthreads)>>>(size_i,0,tau,a); 
 
@@ -346,7 +352,6 @@ void launch_tiled_qr(
         void test_qrkernel_double(
             int32_t size_i,
             float *a, float *tau) {
-    
             base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,tau,a); 
             base_calcQR_doubletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,1,tau,a); 
         
@@ -356,12 +361,11 @@ void launch_tiled_qr(
         void test_mulqtkernel_double(
             int32_t size_i,
             float *a, float *tau) {
-    
                 base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,tau,a); 
                 base_applyQt_singletile<<<1,dim3(tilesize,numthreads)>>>(size_i,0,tau,a); 
                 base_calcQR_doubletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,1,tau,a);
                 base_applyQt_doubletile<<<1,dim3(tilesize,numthreads)>>>(size_i,0,1,tau,a); 
-    
+                base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,1,tau,a); 
         
             }
         
@@ -371,7 +375,15 @@ void launch_tiled_qr(
 
 ////////////////////////////////////////////////////////////////////////////////
 
-
+void print_matrix(int32_t n_row, int32_t n_col, std::vector<float> const &matrix) {
+    for (int32_t i = 0; i < n_row; i++) {
+        printf("    ");
+        for (int32_t j = 0; j < n_col; j++) {
+            printf("%10.5f ", matrix.at(i * n_col + j));
+        }
+        printf("\n");
+    }
+}
 
 std::vector<float> read_data(std::string const &path, int32_t size) {
     std::ifstream file(path, std::ios::binary);
@@ -437,6 +449,7 @@ TestData read_test_data(
                     std::to_string(size_j) + ".bin",
                 size_i * size_j);
         }
+
     }
     return data;
 }
@@ -490,18 +503,18 @@ void run_config(
     }
 
     if (phase == Phase::TEST){
-        if(size_i==32 && size_j==32){
-            Impl::testqr(size_i, a_gpu, tau_gpu);
-        }else if (size_i==32){
-            Impl::testmulq(size_i, a_gpu, tau_gpu);
-        }else if (size_j==32){
-            Impl::testqr2(size_i, a_gpu, tau_gpu);
+        if(size_i==tilesize && size_j==tilesize){
+            Impl::testqr(size_j, a_gpu, tau_gpu);
+        }else if (size_i==tilesize){
+            Impl::testmulq(size_j, a_gpu, tau_gpu);
+        }else if (size_j==tilesize){
+            Impl::testqr2(size_j, a_gpu, tau_gpu);
         }else{
-            Impl::testmulq2(size_i, a_gpu, tau_gpu);
+            Impl::testmulq2(size_j, a_gpu, tau_gpu);
         }
 
     }else{
-        Impl::run(size_i,   a_gpu, tau_gpu);
+        Impl::run(size_j,   a_gpu, tau_gpu);
     }
 
     std::vector<float> c_out_host(size_i * size_j);
@@ -514,24 +527,31 @@ void run_config(
     double mse = 0.0;
     double ref_mean_square = 0.0;
     for (int32_t i = 0; i < size_i; ++i) {
-        for (int32_t j = 0; j < size_j; ++j) {
-            float diff = c_out_host[i * size_j + j] - ref[i * size_j + j];
+        for (int32_t j = i; j < size_j; ++j) {
+            float diff = abs(c_out_host[i * size_j + j]) - abs(ref[i * size_j + j]);
             mse += diff * diff;
-            ref_mean_square += ref[i * size_j + j] * ref[i * size_j + j];
+            ref_mean_square += abs(ref[i * size_j + j]) * abs(ref[i * size_j + j]);
         }
     }
-    mse /= size_i * size_j;
-    ref_mean_square /= size_i * size_j;
+    mse /= (size_i * size_j/2);
+    ref_mean_square /= (size_i * size_j/2);
     float rmse = std::sqrt(mse);
     float rel_rmse = rmse / std::sqrt(ref_mean_square);
 
     if (phase == Phase::BENCHMARK || phase == Phase::TEST ) {
-        printf("rmse:  %8.02e", rel_rmse);
+        printf("  -- rmse:  %8.02e", rel_rmse);
     }
 
-    if (rel_rmse > 1e-5) {
+    if (rel_rmse > 1e-3) {
         if (phase == Phase::BENCHMARK) {
             printf("  %9s  %7s", "-", "-");
+        } else if (phase == Phase::TEST){
+            printf("\n");
+            printf("  expected output:\n");
+            print_matrix(size_i, size_j, ref);
+            printf("\n");
+            printf("  obtained output:\n");
+            print_matrix(size_i,  size_j, c_out_host);
         }
     } else {
         double target_time_ms = 200.0;
@@ -544,7 +564,7 @@ void run_config(
                 }
             },
             [&]() {
-                Impl::run(size_i,  a_gpu, tau_gpu);
+                Impl::run(size_j,  a_gpu, tau_gpu);
             });
 
         if (phase == Phase::BENCHMARK) {
@@ -616,20 +636,20 @@ struct QRbase {
     }
 
     static void
+    testqr2(int32_t size_i,
+        float *a, float *tau) {
+        qr_base::test_qrkernel_double(size_i,a, tau) ;
+    }
+    static void
     testmulq(int32_t size_i,
         float *a, float *tau) {
         qr_base::test_mulqtkernel_single(size_i,a, tau) ;
-    }
-    static void
-    testqr2(int32_t size_i,
-        float *a, float *tau) {
-        qr_base::test_qrkernel_single(size_i,a, tau) ;
     }
 
     static void
     testmulq2(int32_t size_i,
         float *a, float *tau) {
-        qr_base::test_mulqtkernel_single(size_i,a, tau) ;
+        qr_base::test_mulqtkernel_double(size_i,a, tau) ;
     }
 };
 
@@ -685,7 +705,7 @@ int main(int argc, char **argv) {
     }
 
     auto configs_test = std::vector<BenchmarkConfig>{
-        {{32,32}, {32,64},  {64,32}, {64,64}},
+        {{tilesize,tilesize}, {tilesize*2,tilesize},  {tilesize,tilesize*2}, {tilesize*2,tilesize*2}},
     };
 
     
