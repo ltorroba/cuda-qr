@@ -23,7 +23,6 @@ __global__ void base_applyQt_singletile( //aplies Qt (given by householder refle
         outs[i][l]=out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset];
         Qs[i][l]=out[(i+diagstartidx)*size_in+l+diagstartidx];
     }
-    
 
     __syncthreads();
 
@@ -50,6 +49,7 @@ __global__ void base_applyQt_singletile( //aplies Qt (given by householder refle
 
     for (int l=j;l<tilesize;l+=numthreads){
         out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset]=outs[i][l];
+        // out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset]=1.0f;
     }
 }
 
@@ -146,7 +146,6 @@ void reference_applyQt(int size_in, int diag_iter, const float* tau, float* matr
 }
 
 // After all the other code, add this explicit instantiation:
-template __global__ void base_applyQt_singletile<32, 32>(int size_in, 
-                                                        int diag_iter, 
-                                                        const float* tau, 
-                                                        float* out);
+template __global__ void base_applyQt_singletile<32, 4>(
+    int size_in, int diag_iter, const float* tau, float* out
+);
