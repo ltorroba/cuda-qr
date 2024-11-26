@@ -9,7 +9,7 @@ np.random.seed(0xCA7CAFE)
 script_dir = os.path.dirname(os.path.realpath(__file__))
 
 
-sizes = [ 32, 128,  512, 2048]
+sizes = [ 128,  512, 2048]
 test_sizes=[(32,32),(32,64),(64,32),(64,64)]
 
 

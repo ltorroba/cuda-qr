@@ -48,6 +48,33 @@ __device__ __forceinline__ void async_memcpy_waitall() {
     asm volatile("cp.async.wait_all;\n" ::);
 }
 
+// Macro for checking CUDA errors
+#define CHECK_CUDA(call) { \
+    const cudaError_t error = call; \
+    if (error != cudaSuccess) { \
+        printf("CUDA Error: %s:%d, %s\n", __FILE__, __LINE__, cudaGetErrorString(error)); \
+        exit(EXIT_FAILURE); \
+    } \
+}
+
+// Macro for checking cuBLAS errors
+#define CHECK_CUBLAS(call) { \
+    const cublasStatus_t status = call; \
+    if (status != CUBLAS_STATUS_SUCCESS) { \
+        printf("cuBLAS Error: %s:%d, status: %d\n", __FILE__, __LINE__, status); \
+        exit(EXIT_FAILURE); \
+    } \
+}
+
+// Macro for checking cuSOLVER errors
+#define CHECK_CUSOLVER(call) { \
+    const cusolverStatus_t status = call; \
+    if (status != CUSOLVER_STATUS_SUCCESS) { \
+        printf("cuSOLVER Error: %s:%d, status: %d\n", __FILE__, __LINE__, status); \
+        exit(EXIT_FAILURE); \
+    } \
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 
@@ -315,21 +342,21 @@ __global__ void base_calcQR_doubletile( //calculates in-place QR of diagonal til
 void launch_tiled_qr(
     int32_t size_i,
     float *a, float *tau) {
-        /*
-    if ( numthreadsperblockb %4 !=0 || nummemperblock %4!=0 || ilpnuma%4!=0 || ilpnumb%4!=0){
+        
+    if ( size_i%tilesize !=0 ){
             throw std::invalid_argument( "Not implemented for this argument size" );
     }
-    int result=0;
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor (&result,matmul_improved_macro2, numthreadsperblocka*numthreadsperblockb, 0);
-    printf("%d\n",result);
-    //uint32_t shmem_size_bytes = (((numthreadsperblocka)*(nummemperblock+1)*ilpnuma+(numthreadsperblockb)*(nummemperblock)*ilpnumb));
-    int32_t noblocksa=(size_i+numthreadsperblocka*ilpnuma-1)/(numthreadsperblocka*ilpnuma);
-    int32_t noblocksb=((size_j+numthreadsperblockb*ilpnumb-1))/(numthreadsperblockb*ilpnumb);
-    dim3 num_blocks = dim3(noblocksa*noblocksb,1,1  );
-    dim3 block_size = dim3(numthreadsperblocka*numthreadsperblockb,1,1);
-    //CUDA_CHECK(cudaFuncSetAttribute( matmul_improved_macro2, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size_bytes));
-    matmul_improved_macro2<<<num_blocks, block_size>>>(size_i,size_j,size_k,noblocksa,noblocksb,a,b,c);
-        */
+    int nb_blocks= size_i/tilesize;
+    for(int iter=0;iter<nb_blocks-1;iter++){
+        base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,iter,tau,a); 
+        base_applyQt_singletile<<<nb_blocks-1-iter,dim3(tilesize,numthreads)>>>(size_i,iter,tau,a); 
+        for (int row=1;row+iter<nb_blocks;row++){
+            base_calcQR_doubletile<<<1,dim3(tilesize,tilesize)>>>(size_i,iter,row,tau,a);
+            base_applyQt_doubletile<<<nb_blocks-1-iter,dim3(tilesize,numthreads)>>>(size_i,iter,row,tau,a); 
+        }
+    }
+    base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,nb_blocks-1,tau,a); 
+        
     }
 
     void test_qrkernel_single(
@@ -488,7 +515,6 @@ void run_config(
         size_i * size_j * sizeof(float),
         cudaMemcpyHostToDevice));
 
-
     size_t workspace_size = Impl::get_workspace_size(size_i, size_j);
     float *workspace_gpu = nullptr;
     if (workspace_size > 0) {
@@ -559,8 +585,10 @@ void run_config(
             target_time_ms,
             4,
             [&]() {
+                CUDA_CHECK(cudaMemcpy( a_gpu, a.data(), size_i * size_j * sizeof(float),cudaMemcpyHostToDevice));
                 if (workspace_size > 0) {
                     CUDA_CHECK(cudaMemset(workspace_gpu, 0, workspace_size));
+
                 }
             },
             [&]() {
@@ -597,15 +625,13 @@ BenchmarkResults run_all_configs(
             "size_i",
             "size_j",
             "RRMSE",
-            "time (ms)",
-            "TFLOP/s");
+            "time (ms)",);
         printf(
             "  %-6s  %-6s  %-8s  %-9s  %-7s\n",
             "------",
             "------",
             "--------",
-            "---------",
-            "-------");
+            "---------");
     }
     for (auto const &config : configs) {
         run_config<Impl>(phase, data, config, results);
@@ -654,7 +680,6 @@ struct QRbase {
 };
 
 
-
 std::vector<BenchmarkResults> run_all_impls(
     Phase phase,
     TestData const &data,
@@ -698,6 +723,121 @@ void write_json_results(
     file << "}\n";
 }
 
+BenchmarkResults get_cublas_results(Phase phase,
+    TestData const &data,
+    std::vector<BenchmarkConfig> const &configs) {
+    auto results = BenchmarkResults{"cusolver"};
+    if (phase == Phase::WARMUP) {
+        printf("warmup cusolver:\n\n");
+    }else {
+        printf(" benchmarking cusolver:\n\n", Impl::name);
+        printf(
+            "  %-6s  %-6s   %-9s  \n",
+            "size_i",
+            "size_j",
+            "time (ms)");
+        printf(
+            "  %-6s  %-6s   %-9s  \n",
+            "------",
+            "------",
+            "---------");
+    }
+    for (auto const &config : configs) {
+        auto size_i = config.size_i;
+        auto size_j = config.size_j;
+    
+        auto const &a = data.a.at({size_i, size_j});
+        float *a_gpu;
+        float *tau_gpu;
+        CUDA_CHECK(cudaMalloc(&a_gpu, size_i * size_j * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&tau_gpu, size_i * size_j * sizeof(float))); // TODO: determine size more accurately
+    
+        CUDA_CHECK(cudaMemcpy( a_gpu, a.data(), size_i * size_j * sizeof(float),cudaMemcpyHostToDevice));
+
+        // Setup cuSolver for QR
+        cusolverDnHandle_t solver_handle;
+        CHECK_CUSOLVER(cusolverDnCreate(&solver_handle));
+        
+        // Query working space for QR
+        int lwork;
+        CHECK_CUSOLVER(cusolverDnSgeqrf_bufferSize(solver_handle, m, n, AB, m, &lwork));
+        
+        // Allocate working space
+        float* workspace;
+        CHECK_CUDA(cudaMalloc(&workspace, lwork * sizeof(float)));
+        int* devInfo;
+        CHECK_CUDA(cudaMalloc(&devInfo, sizeof(int)));
+      
+    
+        if (phase == Phase::BENCHMARK) {
+            printf("  %6d  %6d  ", size_i, size_j);
+        } else {
+            printf("  warmup %6d  %6d", size_i, size_j);
+        }
+    
+        
+        // Compute QR factorization in-place in AB
+        CHECK_CUSOLVER(cusolverDnSgeqrf(solver_handle, size_i, size_j, 
+            a_gpu, size_j, tau_gpu, workspace, lwork, devInfo));
+    
+        double target_time_ms = 200.0;
+        double elapsed_ms = benchmark_ms(
+            target_time_ms,
+            4,
+            [&]() {
+                CUDA_CHECK(cudaMemcpy( a_gpu, a.data(), size_i * size_j * sizeof(float),cudaMemcpyHostToDevice));
+                if (lwork > 0) {
+                    CUDA_CHECK(cudaMemset(workspace, 0, lwork));
+                }
+            },
+            [&]() {
+                CHECK_CUSOLVER(cusolverDnSgeqrf(solver_handle, size_i, size_j, 
+                    a_gpu, size_j, tau_gpu, workspace, lwork, devInfo));
+            });
+
+        if (phase == Phase::BENCHMARK) {
+
+            results.elapsed_ms[{size_i, size_j}] = elapsed_ms;
+        }
+        
+    
+        printf("\n");
+    
+        CUDA_CHECK(cudaFree(a_gpu));
+        CUDA_CHECK(cudaFree(tau_gpu));
+        CUDA_CHECK(cudaFree(workspace));
+        CHECK_CUDA(cudaFree(devInfo));
+        CHECK_CUSOLVER(cusolverDnDestroy(solver_handle));
+    }
+    printf("\n");
+    return results;
+
+
+}
+
+void print_speedup(
+    std::vector<BenchmarkConfig> const &configs,
+    BenchmarkResults const &first,
+    BenchmarkResults const &second,
+    BenchmarkResults const &curesults) {
+    printf("\nspeedups %s -> %s:\n\n", first.name, second.name);
+    printf("  %-6s  %-6s  %-6s  %-7s\n", "size_i", "size_j", "speedup", "vs cusolver");
+    printf("  %-6s  %-6s  %-6s  %-7s\n", "------", "------",  "------", "-----------");
+    for (auto const &config : configs) {
+        auto size_i = config.size_i;
+        auto size_j = config.size_j;
+        printf("  %6d  %6d ", size_i, size_j);
+        auto it_first = first.elapsed_ms.find({size_i, size_j});
+        auto it_second = second.elapsed_ms.find({size_i, size_j});
+        if (it_first != first.elapsed_ms.end() && it_second != second.elapsed_ms.end()) {
+            printf("  %6.02fx", it_first->second / it_second->second);
+        } else {
+            printf("  %7s", "-");
+        }
+        printf("\n");
+    }
+}
+
 int main(int argc, char **argv) {
     std::string test_data_dir = ".";
     if (char *c_str_test_data_dir = std::getenv("QR_TEST_DATA_DIR")) {
@@ -707,46 +847,27 @@ int main(int argc, char **argv) {
     auto configs_test = std::vector<BenchmarkConfig>{
         {{tilesize,tilesize}, {tilesize*2,tilesize},  {tilesize,tilesize*2}, {tilesize*2,tilesize*2}},
     };
+    auto configs = std::vector<BenchmarkConfig>{
+        {{128,128}},
+    };
 
     
     auto data = read_test_data(test_data_dir, configs_test);
     run_all_impls(Phase::TEST, data, configs_test);
     
-    /*run_all_impls(Phase::WARMUP, data, configs);
+    auto data = read_test_data(test_data_dir, configs);
+    run_all_impls(Phase::WARMUP, data, configs);
     auto results = run_all_impls(Phase::BENCHMARK, data, configs);
+    get_cublas_results(Phase::WARMUP, data,configs);
+    auto curesults= get_cublas_results(Phase::BENCHMARK, data,configs);
 
     for (int32_t j = 1; j < results.size(); ++j) {
         for (int32_t i = j; i > 0;) {
             --i;
-            auto const &first = results.at(i);
-            auto const &second = results.at(j);
-            printf("\nspeedups %s -> %s:\n\n", first.name, second.name);
-            printf("  %-6s  %-6s  %-6s  %-7s\n", "size_i", "size_j", "size_k", "speedup");
-            printf("  %-6s  %-6s  %-6s  %-7s\n", "------", "------", "------", "-------");
-            for (auto const &config : configs) {
-                auto size_i = config.size_i;
-                auto size_j = config.size_j;
-                auto size_k = config.size_k;
-                printf("  %6d  %6d  %6d", size_i, size_j, size_k);
-                auto it_first = first.elapsed_ms.find({size_i, size_j, size_k});
-                auto it_second = second.elapsed_ms.find({size_i, size_j, size_k});
-                if (it_first != first.elapsed_ms.end() &&
-                    it_second != second.elapsed_ms.end()) {
-                    printf("  %6.02fx", it_first->second / it_second->second);
-                } else {
-                    printf("  %7s", "-");
-                }
-                printf("\n");
-            }
+            print_speedup(configs, results.at(i), results.at(j), curesults);
         }
+    }
             
-    }*/
-
     //write_json_results("out/results.json", results);
-
-    /*auto configs_bench = std::vector<BenchmarkConfig>{
-        {{32,32}, {128,128},  {512,512}, {2048,2048}},
-    };*/
-
     return 0;
 }
