@@ -9,6 +9,8 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+#include <cublas_v2.h>
+#include <cusolverDn.h>
 
 void cuda_check(cudaError_t code, const char *file, int line) {
     if (code != cudaSuccess) {
@@ -621,13 +623,13 @@ BenchmarkResults run_all_configs(
     }else {
         printf("%s:\n\n", Impl::name);
         printf(
-            "  %-6s  %-6s   %-8s  %-9s  %-7s\n",
+            "  %-6s  %-6s   %-8s  %-9s  \n",
             "size_i",
             "size_j",
             "RRMSE",
-            "time (ms)",);
+            "time (ms)");
         printf(
-            "  %-6s  %-6s  %-8s  %-9s  %-7s\n",
+            "  %-6s  %-6s  %-8s  %-9s\n",
             "------",
             "------",
             "--------",
@@ -730,7 +732,7 @@ BenchmarkResults get_cublas_results(Phase phase,
     if (phase == Phase::WARMUP) {
         printf("warmup cusolver:\n\n");
     }else {
-        printf(" benchmarking cusolver:\n\n", Impl::name);
+        printf(" benchmarking cusolver:\n\n");
         printf(
             "  %-6s  %-6s   %-9s  \n",
             "size_i",
@@ -760,7 +762,7 @@ BenchmarkResults get_cublas_results(Phase phase,
         
         // Query working space for QR
         int lwork;
-        CHECK_CUSOLVER(cusolverDnSgeqrf_bufferSize(solver_handle, m, n, AB, m, &lwork));
+        CHECK_CUSOLVER(cusolverDnSgeqrf_bufferSize(solver_handle, size_j, size_j, a_gpu, size_j, &lwork));
         
         // Allocate working space
         float* workspace;
@@ -855,7 +857,7 @@ int main(int argc, char **argv) {
     auto data = read_test_data(test_data_dir, configs_test);
     run_all_impls(Phase::TEST, data, configs_test);
     
-    auto data = read_test_data(test_data_dir, configs);
+    data = read_test_data(test_data_dir, configs);
     run_all_impls(Phase::WARMUP, data, configs);
     auto results = run_all_impls(Phase::BENCHMARK, data, configs);
     get_cublas_results(Phase::WARMUP, data,configs);
