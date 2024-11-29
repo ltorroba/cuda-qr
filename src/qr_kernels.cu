@@ -557,20 +557,30 @@ void run_config(
         double target_time_ms = 200.0;
         double elapsed_ms = benchmark_ms(
             target_time_ms,
-            4,
+            20,
             [&]() {
                 if (workspace_size > 0) {
                     CUDA_CHECK(cudaMemset(workspace_gpu, 0, workspace_size));
                 }
             },
             [&]() {
-                Impl::run(size_j,  a_gpu, tau_gpu);
+                if (phase == Phase::TEST){
+                    if(size_i==tilesize && size_j==tilesize){
+                        Impl::testqr(size_j, a_gpu, tau_gpu);
+                    }else if (size_i==tilesize){
+                        Impl::testmulq(size_j, a_gpu, tau_gpu);
+                    }else if (size_j==tilesize){
+                        Impl::testqr2(size_j, a_gpu, tau_gpu);
+                    }else{
+                        Impl::testmulq2(size_j, a_gpu, tau_gpu);
+                    }
+                }else{
+                    Impl::run(size_j,   a_gpu, tau_gpu);
+                }
             });
 
-        if (phase == Phase::BENCHMARK) {
-
-            results.elapsed_ms[{size_i, size_j}] = elapsed_ms;
-        }
+        results.elapsed_ms[{size_i, size_j}] = elapsed_ms;
+        printf("  %8.02e", elapsed_ms);
     }
 
     printf("\n");
