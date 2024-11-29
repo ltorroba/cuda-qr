@@ -504,12 +504,16 @@ void run_config(
 
     if (phase == Phase::TEST){
         if(size_i==tilesize && size_j==tilesize){
+            printf(" %-12s ", "(testqr)");
             Impl::testqr(size_j, a_gpu, tau_gpu);
         }else if (size_i==tilesize){
+            printf(" %-12s ", "(testmulq)");
             Impl::testmulq(size_j, a_gpu, tau_gpu);
         }else if (size_j==tilesize){
+            printf(" %-12s ", "(testqr2)");
             Impl::testqr2(size_j, a_gpu, tau_gpu);
         }else{
+            printf(" %-12s ", "(testmulq2)");
             Impl::testmulq2(size_j, a_gpu, tau_gpu);
         }
 
@@ -580,7 +584,7 @@ void run_config(
             });
 
         results.elapsed_ms[{size_i, size_j}] = elapsed_ms;
-        printf("  %8.02e", elapsed_ms);
+        printf("    time:   %8.02e", elapsed_ms);
     }
 
     printf("\n");
