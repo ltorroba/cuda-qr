@@ -78,7 +78,16 @@ struct QtKernel {
 };
 
 int main(int argc, char **argv) {
-    const int num_trials = 1;
+    bool verbose = false;
+    for (int i = 1; i < argc; i++) {
+        if (std::string(argv[i]) == "--verbose") {
+            verbose = true;
+            break;
+        }
+    }
+
+    const int num_trials = 100;
+    // TODO: Fix for larger matrix sizes (e.g., 96)
     const int size_in = 64;  // matrix size
     constexpr int tilesize = 32;  // tile size
     constexpr int numthreads = 4;  // compile-time constant
@@ -97,17 +106,26 @@ int main(int argc, char **argv) {
 
     // Define kernel implementations
     std::vector<QtKernel> kernels = {
-        QtKernel("Original Implementation",
-            [](int size_in, int diag_iter, const float* tau, float* matrix) {
-                dim3 grid(1);
-                dim3 block(tilesize, numthreads);
-                base_applyQt_singletile<tilesize, numthreads><<<grid, block>>>(size_in, diag_iter, tau, matrix);
-                CHECK_CUDA(cudaDeviceSynchronize());
-            }
+        QtKernel("Original (Evelyne)",
+            launch_base_applyQt_singletile_evelyne
         ),
-        // QtKernel("Reference Implementation",
-        //     reference_applyQt
-        // )
+        QtKernel("Improved (Lucas)",
+            launch_base_applyQt_singletile
+        ),
+        QtKernel("Reference Implementation",
+            // TODO: This is unfair to cuBLAS; should use efficient kernel & in col major
+            // TODO: Maybe we could introduce optional preamble and postamble functions, with
+            //       a shared pointer between them?
+            [&](int size_in, int diag_iter, const float* tau, float* matrix_out) {
+                // Allocate memory for column major result
+                float* matrix_out_col_major;
+                CHECK_CUDA(cudaMalloc(&matrix_out_col_major, size_in * size_in * sizeof(float)));
+                convert_matrix_major(matrix_out, matrix_out_col_major, size_in, size_in);
+                reference_applyQt(size_in, diag_iter, tau, matrix_out_col_major);
+                convert_matrix_major(matrix_out_col_major, matrix_out, size_in, size_in, false);
+                CHECK_CUDA(cudaFree(matrix_out_col_major));
+            }
+        )
     };
 
     // Results structure
@@ -236,11 +254,11 @@ int main(int argc, char **argv) {
                             float diff = std::abs(host_custom[row_major_idx] - host_ref[col_major_idx]);
                             result.max_error = std::max(result.max_error, diff);
 
-                            std::cout << "tile: " << tile << " row: " << row << " col: " << col << "\n";
-                            std::cout << "host_custom[" << row_major_idx << "] = " << host_custom[row_major_idx] << "\n";
-                            std::cout << "host_ref[" << col_major_idx << "] = " << host_ref[col_major_idx] << "\n";
+                            // std::cout << "tile: " << tile << " row: " << row << " col: " << col << "\n";
+                            // std::cout << "host_custom[" << row_major_idx << "] = " << host_custom[row_major_idx] << "\n";
+                            // std::cout << "host_ref[" << col_major_idx << "] = " << host_ref[col_major_idx] << "\n";
 
-                            if (diff > 1e-5) {
+                            if (diff > 1e-5 && verbose) {
                                 std::cout << "Large difference at tile (" 
                                         << row/tilesize << "," << col/tilesize 
                                         << ") rel_position (" << row % tilesize << "," << col % tilesize 

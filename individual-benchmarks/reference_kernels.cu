@@ -3,8 +3,18 @@
 #include <cusolverDn.h>
 #include "cuda_utils.cuh"
 
+__host__ __device__ __forceinline__ int32_t ceil_div(int32_t a, int32_t b) { return (a + b - 1) / b; }
+constexpr int32_t __host__ __device__ ceil_div_static(int32_t a, int32_t b) { return (a + b - 1) / b; }
+
+template <typename T>
+__host__ __device__ __forceinline__ void swap_pointers(T** a, T** b) {
+    auto temp_a = *a;
+    *a = *b;
+    *b = temp_a;
+}
+
 template <int tilesize, int numthreads>
-__global__ void base_applyQt_singletile( //aplies Qt (given by householder reflectors on diagonal tile k) to the remainder of the row
+__global__ void base_applyQt_singletile_evelyne( //aplies Qt (given by householder reflectors on diagonal tile k) to the remainder of the row
     int size_in,
     int diag_iter,
     float const *tau,
@@ -53,6 +63,84 @@ __global__ void base_applyQt_singletile( //aplies Qt (given by householder refle
     for (int l=j;l<tilesize;l+=numthreads){
         out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset]=outs[i][l];
     }
+}
+
+void launch_base_applyQt_singletile_evelyne(int size_in, int diag_iter, float const *tau, float *out) {
+    const auto tilesize = 32;
+    const auto numthreads = 4;
+    base_applyQt_singletile_evelyne<tilesize, numthreads><<<1, dim3(tilesize, numthreads)>>>(size_in, diag_iter, tau, out); 
+}
+
+template <int tile_size>
+__global__ void base_applyQt_singletile(int size_in, int diag_iter, float const *tau, float *out) {
+    auto num_threads = gridDim.x * blockDim.x;
+    auto thread_idx = blockDim.x * blockIdx.x + threadIdx.x;
+    auto columns_to_skip = (diag_iter + 1) * tile_size;
+    auto columns_per_thread = ceil_div(size_in - columns_to_skip, num_threads);
+
+    // TODO: Use all threads in block to load the columns we will be processing using a better
+    //       access pattern
+
+    // Load householder reflectors and taus
+    float householder_reflectors[tile_size][tile_size];
+    float taus[tile_size];
+    for (auto reflector_idx = 0; reflector_idx < tile_size; reflector_idx++) {
+        taus[reflector_idx] = tau[diag_iter * size_in + reflector_idx];
+        for (auto element_idx = reflector_idx + 1; element_idx < tile_size; element_idx++) {
+            auto householder_reflector_i = diag_iter * tile_size + element_idx;
+            auto householder_reflector_j = diag_iter * tile_size + reflector_idx;
+            householder_reflectors[element_idx][reflector_idx] = out[householder_reflector_i * size_in + householder_reflector_j];
+        }
+    }
+
+    float current_column[tile_size];
+    for (auto current_column_idx = 0; current_column_idx < columns_per_thread; current_column_idx++) {
+        auto current_column_j = columns_to_skip + thread_idx * columns_per_thread + current_column_idx;
+
+        if (current_column_j >= size_in)
+            break;
+
+        // Load current column we are processing
+        for (auto local_i = 0; local_i < tile_size; local_i++) {
+            auto current_column_i = diag_iter * tile_size + local_i;
+            current_column[local_i] = out[current_column_i * size_in + current_column_j];
+        }
+
+        // Process current column by applying householder reflectors in reverse order
+        for (auto householder_reflector = 0; householder_reflector < tile_size; householder_reflector++) {
+            // First we compute tau * (h' x)
+            auto effective_scaling = 0.0f;
+            for (auto element_idx = 0; element_idx < tile_size; element_idx++) {
+                if (element_idx == householder_reflector) {
+                    // Implicit leading 1 in householder reflector
+                    effective_scaling += current_column[element_idx];
+                } else if (element_idx > householder_reflector) {
+                    effective_scaling += householder_reflectors[element_idx][householder_reflector] * current_column[element_idx];
+                }
+            }
+            effective_scaling *= taus[householder_reflector];
+
+            // We now compute h (tau * (h' x)) to wrap things up
+            for (auto element_idx = 0; element_idx < tile_size; element_idx++) {
+                if (element_idx == householder_reflector) {
+                    current_column[element_idx] -= effective_scaling;
+                } else if (element_idx > householder_reflector) {
+                    current_column[element_idx] -= effective_scaling * householder_reflectors[element_idx][householder_reflector];
+                }
+            }
+        }
+
+        // Write out processed column
+        for (auto local_i = 0; local_i < tile_size; local_i++) {
+            auto current_column_i = diag_iter * tile_size + local_i;
+            out[current_column_i * size_in + current_column_j] = current_column[local_i];
+        }
+    }
+}
+
+void launch_base_applyQt_singletile(int size_in, int diag_iter, float const *tau, float *out) {
+    const auto tilesize = 32;
+    base_applyQt_singletile<tilesize><<<tilesize, tilesize>>>(size_in, diag_iter, tau, out); 
 }
 
 
@@ -144,8 +232,3 @@ void reference_applyQt(int size_in, int diag_iter, const float* tau, float* matr
     CHECK_CUDA(cudaFree(householder_vectors));
     CHECK_CUSOLVER(cusolverDnDestroy(handle));
 }
-
-// After all the other code, add this explicit instantiation:
-template __global__ void base_applyQt_singletile<32, 4>(
-    int size_in, int diag_iter, const float* tau, float* out
-);
