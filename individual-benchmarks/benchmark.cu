@@ -26,6 +26,48 @@ double benchmark_kernel(F func, int num_trials = 1) {
     return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / (double)num_trials;
 }
 
+void convert_matrix_major(const float* input_d,
+                         float* output_d,
+                         int m,      // rows
+                         int n,      // cols
+                         bool to_column_major = true) {
+    cublasHandle_t handle;
+    CHECK_CUBLAS(cublasCreate(&handle));
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    
+    if (to_column_major) {
+        // Converting row-major to column-major
+        CHECK_CUBLAS(cublasSgeam(handle,
+                                CUBLAS_OP_T,    // transpose
+                                CUBLAS_OP_N,    // no-op
+                                m, n,           // output dimensions
+                                &alpha,
+                                input_d,        // input (viewed as n x m by cuBLAS)
+                                n,              // leading dimension of input
+                                &beta,
+                                nullptr,        // no B matrix
+                                m,              // ldb (unused)
+                                output_d,       // output
+                                m));            // leading dimension of output
+    } else {
+        // Converting column-major to row-major
+        CHECK_CUBLAS(cublasSgeam(handle,
+                                CUBLAS_OP_T,    // transpose
+                                CUBLAS_OP_N,    // no-op
+                                n, m,           // output dimensions (swapped)
+                                &alpha,
+                                input_d,        // input
+                                m,              // leading dimension of input
+                                &beta,
+                                nullptr,        // no B matrix
+                                n,              // ldb (unused)
+                                output_d,       // output
+                                n));            // leading dimension of output
+    }
+}
+
 struct QtKernel {
     std::string name;
     std::function<void(int, int, const float*, float*)> kernel;
@@ -63,9 +105,9 @@ int main(int argc, char **argv) {
                 CHECK_CUDA(cudaDeviceSynchronize());
             }
         ),
-        QtKernel("Reference Implementation",
-            reference_applyQt
-        )
+        // QtKernel("Reference Implementation",
+        //     reference_applyQt
+        // )
     };
 
     // Results structure
@@ -166,9 +208,8 @@ int main(int argc, char **argv) {
             
             // Test each implementation
             for (size_t i = 0; i < kernels.size(); i++) {
-                CHECK_CUDA(cudaMemcpy(d_matrix_out, d_matrix,
-                                    size_in * size_in * sizeof(float),
-                                    cudaMemcpyDeviceToDevice));
+                // Copy input from column major (default cuBLAS format) to row major
+                convert_matrix_major(d_matrix, d_matrix_out, size_in, size_in);
 
                 auto& kernel = kernels[i];
                 auto& result = results[i];
@@ -184,23 +225,28 @@ int main(int argc, char **argv) {
                                     size_in * size_in * sizeof(float),
                                     cudaMemcpyDeviceToHost));
                 
-                // Compare only the relevant tiles (to the right of diagonal)
+                // Compare only the relevant tiles. We include the diagonal tiles since these should
+                // not be modified by the kernel
                 for (int tile = diag_iter; tile < size_in/tilesize; tile++) {
                     for (int row = diag_iter * tilesize; row < (diag_iter + 1) * tilesize; row++) {
-                        for (int col = tile * tilesize; col < (tile + 1) * tilesize; col++) {
-                            int idx = col * size_in + row;
-                            float diff = std::abs(host_custom[idx] - host_ref[idx]);
+                        // for (int col = tile * tilesize; col < (tile + 1) * tilesize; col++) {
+                        for (int col = tile * tilesize; col < tile * tilesize + 2; col++) {
+                            int col_major_idx = col * size_in + row;
+                            int row_major_idx = row * size_in + col;
+                            float diff = std::abs(host_custom[row_major_idx] - host_ref[col_major_idx]);
                             result.max_error = std::max(result.max_error, diff);
 
-                            std::cout << "host_custom[" << idx << "] = " << host_custom[idx] << "\n";
-                            std::cout << "host_ref[" << idx << "] = " << host_ref[idx] << "\n";
+                            std::cout << "tile: " << tile << " row: " << row << " col: " << col << "\n";
+                            std::cout << "host_custom[" << row_major_idx << "] = " << host_custom[row_major_idx] << "\n";
+                            std::cout << "host_ref[" << col_major_idx << "] = " << host_ref[col_major_idx] << "\n";
 
                             if (diff > 1e-5) {
                                 std::cout << "Large difference at tile (" 
                                         << row/tilesize << "," << col/tilesize 
-                                        << ") position (" << row % tilesize << "," << col % tilesize 
-                                        << "): custom=" << host_custom[idx] 
-                                        << " ref=" << host_ref[idx] 
+                                        << ") rel_position (" << row % tilesize << "," << col % tilesize 
+                                        << ") abs_position (" << row << "," << col << ")\n"
+                                        << "): custom=" << host_custom[row_major_idx] 
+                                        << " ref=" << host_ref[col_major_idx] 
                                         << " diff=" << diff << "\n";
                             }
                         }

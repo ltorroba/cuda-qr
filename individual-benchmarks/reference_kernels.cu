@@ -17,12 +17,15 @@ __global__ void base_applyQt_singletile( //aplies Qt (given by householder refle
     __shared__ float cache[tilesize][numthreads];
     int diagstartidx=diag_iter*tilesize;
     int tileoffset=(1+g)*tilesize;
-    
+
+    if (diag_iter == size_in/tilesize - 1)
+        return;
     
     for (int l=j;l<tilesize;l+=numthreads){
         outs[i][l]=out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset];
         Qs[i][l]=out[(i+diagstartidx)*size_in+l+diagstartidx];
     }
+    
 
     __syncthreads();
 
@@ -49,7 +52,6 @@ __global__ void base_applyQt_singletile( //aplies Qt (given by householder refle
 
     for (int l=j;l<tilesize;l+=numthreads){
         out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset]=outs[i][l];
-        // out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset]=1.0f;
     }
 }
 
@@ -79,14 +81,12 @@ void reference_applyQt(int size_in, int diag_iter, const float* tau, float* matr
     
     // For each tile to the right of the diagonal
     for(int g = 1; g < (size_in - diagstartidx) / tilesize; g++) {
-        int tileoffset = g * tilesize;
-        
         // Extract the tile we're updating
         float* work_tile;
         CHECK_CUDA(cudaMalloc(&work_tile, tilesize * tilesize * sizeof(float)));
         for(int j = 0; j < tilesize; j++) {
             CHECK_CUDA(cudaMemcpy(work_tile + j * tilesize,
-                                 matrix + (diagstartidx + j) * size_in + diagstartidx + tileoffset,
+                                 matrix + (diagstartidx + j + g * tilesize) * size_in + diagstartidx,
                                  tilesize * sizeof(float),
                                  cudaMemcpyDeviceToDevice));
         }
@@ -128,7 +128,7 @@ void reference_applyQt(int size_in, int diag_iter, const float* tau, float* matr
             
         // Copy result back
         for(int j = 0; j < tilesize; j++) {
-            CHECK_CUDA(cudaMemcpy(matrix + (diagstartidx + j) * size_in + diagstartidx + tileoffset,
+            CHECK_CUDA(cudaMemcpy(matrix + (diagstartidx + j + g * tilesize) * size_in + diagstartidx,
                                  work_tile + j * tilesize,
                                  tilesize * sizeof(float),
                                  cudaMemcpyDeviceToDevice));
