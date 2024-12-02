@@ -88,7 +88,7 @@ int main(int argc, char **argv) {
 
     const int num_trials = 100;
     // TODO: Fix for larger matrix sizes (e.g., 96)
-    const int size_in = 64;  // matrix size
+    const int size_in = 96;  // matrix size
     constexpr int tilesize = 32;  // tile size
     constexpr int numthreads = 4;  // compile-time constant
     
@@ -247,8 +247,7 @@ int main(int argc, char **argv) {
                 // not be modified by the kernel
                 for (int tile = diag_iter; tile < size_in/tilesize; tile++) {
                     for (int row = diag_iter * tilesize; row < (diag_iter + 1) * tilesize; row++) {
-                        // for (int col = tile * tilesize; col < (tile + 1) * tilesize; col++) {
-                        for (int col = tile * tilesize; col < tile * tilesize + 2; col++) {
+                        for (int col = tile * tilesize; col < (tile + 1) * tilesize; col++) {
                             int col_major_idx = col * size_in + row;
                             int row_major_idx = row * size_in + col;
                             float diff = std::abs(host_custom[row_major_idx] - host_ref[col_major_idx]);

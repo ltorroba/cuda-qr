@@ -150,6 +150,8 @@ void reference_applyQt(int size_in, int diag_iter, const float* tau, float* matr
     
     int tilesize = 32;  // match the original implementation
     int diagstartidx = diag_iter * tilesize;
+
+    const float* taus = &tau[diag_iter * size_in];
     
     // We need:
     // 1. The Householder vectors (from the diagonal tile)
@@ -189,7 +191,7 @@ void reference_applyQt(int size_in, int diag_iter, const float* tau, float* matr
             tilesize,           // number of elementary reflectors
             householder_vectors, // the reflectors
             tilesize,           // leading dimension
-            tau + diagstartidx, // tau values
+            taus,               // tau values
             work_tile,          // matrix to update
             tilesize,           // leading dimension
             &lwork));
@@ -209,7 +211,7 @@ void reference_applyQt(int size_in, int diag_iter, const float* tau, float* matr
             tilesize,           // number of elementary reflectors
             householder_vectors, // the reflectors
             tilesize,           // leading dimension
-            tau + diagstartidx, // tau values
+            taus,               // tau values
             work_tile,          // matrix to update
             tilesize,           // leading dimension
             workspace, lwork, devInfo));
