@@ -35,26 +35,31 @@ with open(os.path.join(script_dir, "test_sizes.json"), "w") as f:
 
 
 
-for size_i in sizes:
-    a = np.random.randn(size_i, size_i).astype(np.float32)
-    a_fname = os.path.join(script_dir, f"test_a_{size_i}_{size_i}.bin")
-    with open(a_fname, "wb") as f:
-        f.write(a.tobytes())
-    print(f"Wrote {a_fname!r}")
-    c = np.transpose(np.linalg.qr(a, mode = "raw")[0])
-    c_fname = os.path.join(script_dir, f"test_ref_{size_i}_{size_i}.bin")
-    with open(c_fname, "wb") as f:
-        f.write(c.tobytes())
-    print(f"Wrote {c_fname!r}")
-
 for (size_i,size_j) in test_sizes:
     a = np.random.randn(size_i, size_j).astype(np.float32)
     a_fname = os.path.join(script_dir, f"test_a_{size_i}_{size_j}.bin")
     with open(a_fname, "wb") as f:
         f.write(a.tobytes())
-    print(f"Wrote {a_fname!r}")
     c = np.transpose(np.linalg.qr(a, mode = "raw")[0])
     c_fname = os.path.join(script_dir, f"test_ref_{size_i}_{size_j}.bin")
     with open(c_fname, "wb") as f:
         f.write(c.tobytes())
-    print(f"Wrote {c_fname!r}")
+        
+
+for size_i in sizes:
+    a = np.random.randn(size_i, size_i).astype(np.float32)
+    a_fname = os.path.join(script_dir, f"test_a_{size_i}_{size_i}.bin")
+    with open(a_fname, "wb") as f:
+        f.write(a.tobytes())
+    c = np.transpose(np.linalg.qr(a, mode = "raw")[0])
+    c_fname = os.path.join(script_dir, f"test_ref_{size_i}_{size_i}.bin")
+    with open(c_fname, "wb") as f:
+        f.write(c.tobytes())
+    x = np.random.randn(size_i, 32).astype(np.float32)
+    x_fname = os.path.join(script_dir, f"test_x_{size_i}.bin")
+    with open(x_fname, "wb") as f:
+        f.write(x.tobytes())
+    d = np.transpose(np.linalg.qr(a)[0]).dot( x)
+    d_fname = os.path.join(script_dir, f"test_xmul_{size_i}.bin")
+    with open(d_fname, "wb") as f:
+        f.write(x.tobytes())
