@@ -68,7 +68,14 @@ __global__ void base_applyQt_singletile_evelyne( //aplies Qt (given by household
 void launch_base_applyQt_singletile_evelyne(int size_in, int diag_iter, float const *tau, float *out) {
     const auto tilesize = 32;
     const auto numthreads = 4;
-    base_applyQt_singletile_evelyne<tilesize, numthreads><<<1, dim3(tilesize, numthreads)>>>(size_in, diag_iter, tau, out); 
+
+    // Need to launch one block for tile to the right of the diagonal to be processed
+    const auto num_blocks = (size_in / tilesize - 1) - diag_iter;
+
+    if (num_blocks <= 0)
+        return;
+
+    base_applyQt_singletile_evelyne<tilesize, numthreads><<<num_blocks, dim3(tilesize, numthreads)>>>(size_in, diag_iter, tau, out); 
 }
 
 template <int tile_size>
@@ -164,6 +171,98 @@ void reference_applyQt(int size_in, int diag_iter, const float* tau, float* matr
     // Copy the diagonal tile (contains the Householder vectors)
     for(int j = 0; j < tilesize; j++) {
         CHECK_CUDA(cudaMemcpy(householder_vectors + j * tilesize,
+                             matrix + (diagstartidx + j) * size_in + diagstartidx,
+                             tilesize * sizeof(float),
+                             cudaMemcpyDeviceToDevice));
+    }
+    
+    // For each tile to the right of the diagonal
+    for(int g = 1; g < (size_in - diagstartidx) / tilesize; g++) {
+        // Extract the tile we're updating
+        float* work_tile;
+        CHECK_CUDA(cudaMalloc(&work_tile, tilesize * tilesize * sizeof(float)));
+        for(int j = 0; j < tilesize; j++) {
+            CHECK_CUDA(cudaMemcpy(work_tile + j * tilesize,
+                                 matrix + (diagstartidx + j + g * tilesize) * size_in + diagstartidx,
+                                 tilesize * sizeof(float),
+                                 cudaMemcpyDeviceToDevice));
+        }
+        
+        // Query workspace size
+        int lwork;
+        CHECK_CUSOLVER(cusolverDnSormqr_bufferSize(
+            handle,
+            CUBLAS_SIDE_LEFT,   // apply Q from the left
+            CUBLAS_OP_T,        // apply Q transpose
+            tilesize, tilesize, // dimensions of the tile
+            tilesize,           // number of elementary reflectors
+            householder_vectors, // the reflectors
+            tilesize,           // leading dimension
+            taus,               // tau values
+            work_tile,          // matrix to update
+            tilesize,           // leading dimension
+            &lwork));
+            
+        // Allocate workspace
+        float* workspace;
+        int* devInfo;
+        CHECK_CUDA(cudaMalloc(&workspace, lwork * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&devInfo, sizeof(int)));
+        
+        // Apply Qt to the tile
+        CHECK_CUSOLVER(cusolverDnSormqr(
+            handle,
+            CUBLAS_SIDE_LEFT,   // apply Q from the left
+            CUBLAS_OP_T,        // apply Q transpose
+            tilesize, tilesize, // dimensions of the tile
+            tilesize,           // number of elementary reflectors
+            householder_vectors, // the reflectors
+            tilesize,           // leading dimension
+            taus,               // tau values
+            work_tile,          // matrix to update
+            tilesize,           // leading dimension
+            workspace, lwork, devInfo));
+            
+        // Copy result back
+        for(int j = 0; j < tilesize; j++) {
+            CHECK_CUDA(cudaMemcpy(matrix + (diagstartidx + j + g * tilesize) * size_in + diagstartidx,
+                                 work_tile + j * tilesize,
+                                 tilesize * sizeof(float),
+                                 cudaMemcpyDeviceToDevice));
+        }
+        
+        // Cleanup this iteration
+        CHECK_CUDA(cudaFree(workspace));
+        CHECK_CUDA(cudaFree(devInfo));
+        CHECK_CUDA(cudaFree(work_tile));
+    }
+    
+    // Final cleanup
+    CHECK_CUDA(cudaFree(householder_vectors));
+    CHECK_CUSOLVER(cusolverDnDestroy(handle));
+}
+
+
+void reference_applyQt_fast(int size_in, int diag_iter, const float* tau, float* matrix) {
+    cusolverDnHandle_t handle;
+    CHECK_CUSOLVER(cusolverDnCreate(&handle));
+    
+    int tilesize = 32;  // match the original implementation
+    int diagstartidx = diag_iter * tilesize;
+
+    const float* taus = &tau[diag_iter * size_in];
+    
+    // We need:
+    // 1. The Householder vectors (from the diagonal tile)
+    // 2. The part of the matrix we're updating
+    
+    // First, extract the Householder vectors from the diagonal tile
+    float* householder_vectors;
+    CHECK_CUDA(cudaMalloc(&householder_vectors, tilesize * tilesize * sizeof(float)));
+    
+    // Copy the diagonal tile (contains the Householder vectors)
+    for(int j = 0; j < tilesize; j++) {
+        CHECK_CUDA(cudaMemcpyAsync(householder_vectors + j * tilesize,
                              matrix + (diagstartidx + j) * size_in + diagstartidx,
                              tilesize * sizeof(float),
                              cudaMemcpyDeviceToDevice));

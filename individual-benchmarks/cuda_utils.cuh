@@ -27,7 +27,34 @@
 #define CHECK_CUSOLVER(call) { \
     const cusolverStatus_t status = call; \
     if (status != CUSOLVER_STATUS_SUCCESS) { \
-        printf("cuSOLVER Error: %s:%d, status: %d\n", __FILE__, __LINE__, status); \
+        const char* error_msg; \
+        switch (status) { \
+            case CUSOLVER_STATUS_NOT_INITIALIZED: \
+                error_msg = "CUSOLVER_STATUS_NOT_INITIALIZED: Library not initialized"; \
+                break; \
+            case CUSOLVER_STATUS_ALLOC_FAILED: \
+                error_msg = "CUSOLVER_STATUS_ALLOC_FAILED: Resource allocation failed"; \
+                break; \
+            case CUSOLVER_STATUS_INVALID_VALUE: \
+                error_msg = "CUSOLVER_STATUS_INVALID_VALUE: Invalid value passed"; \
+                break; \
+            case CUSOLVER_STATUS_ARCH_MISMATCH: \
+                error_msg = "CUSOLVER_STATUS_ARCH_MISMATCH: Architecture mismatch"; \
+                break; \
+            case CUSOLVER_STATUS_EXECUTION_FAILED: \
+                error_msg = "CUSOLVER_STATUS_EXECUTION_FAILED: Execution failed"; \
+                break; \
+            case CUSOLVER_STATUS_INTERNAL_ERROR: \
+                error_msg = "CUSOLVER_STATUS_INTERNAL_ERROR: Internal operation failed"; \
+                break; \
+            case CUSOLVER_STATUS_MATRIX_TYPE_NOT_SUPPORTED: \
+                error_msg = "CUSOLVER_STATUS_MATRIX_TYPE_NOT_SUPPORTED: Matrix type not supported"; \
+                break; \
+            default: \
+                error_msg = "Unknown cuSOLVER error"; \
+        } \
+        printf("cuSOLVER Error: %s:%d\nStatus: %d\nMessage: %s\n", \
+               __FILE__, __LINE__, status, error_msg); \
         exit(EXIT_FAILURE); \
     } \
 }

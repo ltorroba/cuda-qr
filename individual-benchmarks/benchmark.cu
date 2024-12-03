@@ -13,17 +13,13 @@
 #include "cuda_utils.cuh"
 
 template<typename F>
-double benchmark_kernel(F func, int num_trials = 1) {
+double benchmark_kernel(F func) {
     CHECK_CUDA(cudaDeviceSynchronize());
     auto start = std::chrono::high_resolution_clock::now();
-    
-    for (int i = 0; i < num_trials; i++) {
-        func();
-        CHECK_CUDA(cudaDeviceSynchronize());
-    }
-    
+    func();
+    CHECK_CUDA(cudaDeviceSynchronize());
     auto end = std::chrono::high_resolution_clock::now();
-    return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / (double)num_trials;
+    return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
 }
 
 void convert_matrix_major(const float* input_d,
@@ -66,6 +62,8 @@ void convert_matrix_major(const float* input_d,
                                 output_d,       // output
                                 n));            // leading dimension of output
     }
+
+    CHECK_CUBLAS(cublasDestroy(handle));
 }
 
 struct QtKernel {
@@ -79,16 +77,20 @@ struct QtKernel {
 
 int main(int argc, char **argv) {
     bool verbose = false;
+    bool memory_usage = false;
     for (int i = 1; i < argc; i++) {
         if (std::string(argv[i]) == "--verbose") {
             verbose = true;
+            break;
+        } else if (std::string(argv[i]) == "--memory-usage") {
+            memory_usage = true;
             break;
         }
     }
 
     const int num_trials = 100;
     // TODO: Fix for larger matrix sizes (e.g., 96)
-    const int size_in = 96;  // matrix size
+    const int size_in = 1024;  // matrix size
     constexpr int tilesize = 32;  // tile size
     constexpr int numthreads = 4;  // compile-time constant
     
@@ -102,7 +104,7 @@ int main(int argc, char **argv) {
     CHECK_CUDA(cudaMalloc(&d_matrix, size_in * size_in * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_matrix_out, size_in * size_in * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_matrix_out_ref, size_in * size_in * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_tau, size_in * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_tau, (size_in / tilesize) * size_in * sizeof(float)));
 
     // Define kernel implementations
     std::vector<QtKernel> kernels = {
@@ -143,6 +145,17 @@ int main(int argc, char **argv) {
     //   - Custom: Call the kernel for this diagonal iter
     //   - Compare the results
     for (int trial = 0; trial < num_trials; trial++) {
+        // Print memory usage at start of each trial
+        if (memory_usage) {
+            size_t free_byte, total_byte;
+            CHECK_CUDA(cudaMemGetInfo(&free_byte, &total_byte));
+            float free_gb = free_byte / (1024.0 * 1024.0 * 1024.0);
+            float total_gb = total_byte / (1024.0 * 1024.0 * 1024.0);
+            float used_gb = total_gb - free_gb;
+            printf("\nTrial %d - Memory Usage: Used = %.2f GB, Free = %.2f GB, Total = %.2f GB\n",
+               trial, used_gb, free_gb, total_gb);
+        }
+
         // Initialize matrix with random data
         curandGenerator_t gen;
         CHECK_CURAND(curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT));
@@ -187,7 +200,7 @@ int main(int argc, char **argv) {
                 tilesize, tilesize,
                 diag_tile,
                 tilesize,
-                d_tau + diag_iter * tilesize,  // tau values for this block
+                d_tau + diag_iter * size_in,  // TODO: Clarify why this is the right format for tau
                 workspace,
                 lwork,
                 devInfo));
@@ -274,7 +287,7 @@ int main(int argc, char **argv) {
     }
     
     // Print results
-    std::cout << "\nResults:\n";
+    std::cout << "\nResults (averaged over " << num_trials << " trials) for (" << size_in << "x" << size_in << "):\n";
     std::cout << std::string(60, '-') << "\n";
     std::cout << std::setw(30) << "Implementation" 
               << std::setw(15) << "Time (ms)" 
@@ -283,7 +296,7 @@ int main(int argc, char **argv) {
     
     for (size_t i = 0; i < kernels.size(); i++) {
         std::cout << std::setw(30) << kernels[i].name 
-                  << std::setw(15) << results[i].total_time / 1000.0f
+                  << std::setw(15) << results[i].total_time / num_trials / 1000.0f
                   << std::setw(15) << results[i].max_error << "\n";
     }
     
