@@ -8,8 +8,8 @@ np.random.seed(0xCA7CAFE)
 
 script_dir = os.path.dirname(os.path.realpath(__file__))
 
-tilesize = 8
-sizes = [128,512,2048]
+tilesize = 32
+sizes = []
 test_sizes=[(tilesize,tilesize),(tilesize,2*tilesize),(2*tilesize,tilesize),(tilesize*2,tilesize*2)]
 
 

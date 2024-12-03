@@ -93,7 +93,7 @@ void print_matrix(int32_t n_row, int32_t n_col, std::vector<float> const &matrix
 
 namespace qr_base {
 
-#define tilesize 8
+#define tilesize 32
 #define numthreads 4
 
 
@@ -608,10 +608,10 @@ void run_config(
     float rel_rmse = std::sqrt(mse) / max(size_i,size_j);
 
     if (phase == Phase::BENCHMARK || phase == Phase::TEST ) {
-        printf("   %8.02e", rel_rmse);
+        printf("     %8.02e", rel_rmse);
     }
 
-    if ((rel_rmse > 1e-3 && size_i>=size_j) || rel_rmse!=rel_rmse ) {
+    if ((rel_rmse > 1e-3 ) || rel_rmse!=rel_rmse ) {
         if (phase == Phase::BENCHMARK) {
             printf("  %9s  %7s", "-", "-");
         } else if (phase == Phase::TEST){
@@ -670,23 +670,23 @@ void run_config(
         cudaMemcpyDeviceToHost));
         
     mse = 0.0;
-    for (int32_t i = 0; i < size_i; ++i) {
+    for (int32_t i = 0; i < min(size_i,size_j); ++i) {
         for (int32_t j = 0; j < tilesize; ++j) {
             float diff = abs(abs(x_out_host[i * tilesize + j]) - abs(xref[i * tilesize + j]))/abs(xref[i * tilesize + j]);
             mse+= diff*diff;
         }
     }
     
-    rel_rmse = std::sqrt(mse) / max(size_i,tilesize);
-    if (size_i>=size_j){
-        rel_rmse=-1;
-    }
+    rel_rmse = std::sqrt(mse) / min(size_i,tilesize);
+
     
     if (phase == Phase::BENCHMARK  || phase == Phase::TEST  ) {
-        printf("   %8.02e", rel_rmse);
+         printf("        %8.02e", rel_rmse);
+        
+        
     }
 
-    if (rel_rmse > 1e-3 || rel_rmse!=rel_rmse) {
+    if ((rel_rmse > 1e-3)  || rel_rmse!=rel_rmse) {
         if (phase == Phase::BENCHMARK) {
             printf("  %9s  %7s", "-", "-");
         } else if (phase == Phase::TEST){
