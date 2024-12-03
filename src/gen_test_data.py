@@ -8,9 +8,9 @@ np.random.seed(0xCA7CAFE)
 
 script_dir = os.path.dirname(os.path.realpath(__file__))
 
-
-sizes = [ 128,  512, 2048]
-test_sizes=[(32,32),(32,64),(64,32),(64,64)]
+tilesize = 8
+sizes = [128,512,2048]
+test_sizes=[(tilesize,tilesize),(tilesize,2*tilesize),(2*tilesize,tilesize),(tilesize*2,tilesize*2)]
 
 
 
@@ -44,7 +44,14 @@ for (size_i,size_j) in test_sizes:
     c_fname = os.path.join(script_dir, f"test_ref_{size_i}_{size_j}.bin")
     with open(c_fname, "wb") as f:
         f.write(c.tobytes())
-        
+    x = np.random.randn(size_i, tilesize).astype(np.float32)
+    x_fname = os.path.join(script_dir, f"test_x_{size_i}_{size_j}.bin")
+    with open(x_fname, "wb") as f:
+        f.write(x.tobytes())
+    d = np.transpose(np.linalg.qr(a, mode="complete")[0]).dot( x)
+    d_fname = os.path.join(script_dir, f"test_xmul_{size_i}_{size_j}.bin")
+    with open(d_fname, "wb") as f:
+        f.write(d.tobytes())
 
 for size_i in sizes:
     a = np.random.randn(size_i, size_i).astype(np.float32)
@@ -55,11 +62,11 @@ for size_i in sizes:
     c_fname = os.path.join(script_dir, f"test_ref_{size_i}_{size_i}.bin")
     with open(c_fname, "wb") as f:
         f.write(c.tobytes())
-    x = np.random.randn(size_i, 32).astype(np.float32)
-    x_fname = os.path.join(script_dir, f"test_x_{size_i}.bin")
+    x = np.random.randn(size_i,tilesize).astype(np.float32)
+    x_fname = os.path.join(script_dir, f"test_x_{size_i}_{size_i}.bin")
     with open(x_fname, "wb") as f:
         f.write(x.tobytes())
-    d = np.transpose(np.linalg.qr(a)[0]).dot( x)
-    d_fname = os.path.join(script_dir, f"test_xmul_{size_i}.bin")
+    d = np.transpose(np.linalg.qr(a, mode="complete")[0]).dot( x)
+    d_fname = os.path.join(script_dir, f"test_xmul_{size_i}_{size_i}.bin")
     with open(d_fname, "wb") as f:
-        f.write(x.tobytes())
+        f.write(d.tobytes())

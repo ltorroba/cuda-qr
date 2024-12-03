@@ -77,13 +77,23 @@ __device__ __forceinline__ void async_memcpy_waitall() {
     } \
 }
 
+void print_matrix(int32_t n_row, int32_t n_col, std::vector<float> const &matrix) {
+    for (int32_t i = 0; i < n_row; i++) {
+        printf("    ");
+        for (int32_t j = 0; j < n_col; j++) {
+            printf("%5.2f ", matrix.at(i * n_col + j));
+        }
+        printf("\n");
+    }
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 
 
 namespace qr_base {
 
-#define tilesize 32
+#define tilesize 8
 #define numthreads 4
 
 
@@ -91,6 +101,7 @@ namespace qr_base {
 
 __global__ void base_applyQt_singletile( //aplies Qt (given by householder reflectors on diagonal tile k) to the remainder of the row
     int size_in,
+    int size_out,
     int diag_iter,
     bool offsetdiag,
     float const *tau,
@@ -102,15 +113,14 @@ __global__ void base_applyQt_singletile( //aplies Qt (given by householder refle
     __shared__ float Qs[tilesize][tilesize];
     __shared__ float cache[tilesize][numthreads];
     int diagstartidx=diag_iter*tilesize;
-    int tileoffset=(1+g)*tilesize;
+    int tileoffset=(g)*tilesize;
+    if (offsetdiag){
+        tileoffset+=diagstartidx+tilesize;
+    }
     
     
     for (int l=j;l<tilesize;l+=numthreads){
-        if (offsetdiag){
-            outs[i][l]=out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset];
-        } else {
-            outs[i][l]=out[(i+diagstartidx)*size_in+l+diagstartidx];
-        }
+        outs[i][l]=out[(i+diagstartidx)*size_out+l+tileoffset];
         Qs[i][l]=in[(i+diagstartidx)*size_in+l+diagstartidx];
     }
     
@@ -139,12 +149,14 @@ __global__ void base_applyQt_singletile( //aplies Qt (given by householder refle
     }
 
     for (int l=j;l<tilesize;l+=numthreads){
-        out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset]=outs[i][l];
+        out[(i+diagstartidx)*size_out+l+tileoffset]=outs[i][l];
     }
+
 }
 
 __global__ void base_applyQt_doubletile( //aplies Qt (given by householder reflectors on the tile at row_idx below diag_idx) to the remainder of the row, and to the row of diag_idx
     int size_in,
+    int size_out,
     int diag_iter,
     int row_iter,
     bool offsetdiag,
@@ -157,23 +169,21 @@ __global__ void base_applyQt_doubletile( //aplies Qt (given by householder refle
     __shared__ float Qs[tilesize][tilesize];
     __shared__ float cache[tilesize][numthreads];
     int diagstartidx=diag_iter*tilesize;
-    int tileoffset=(1+g)*tilesize;
+    int tileoffset=(g)*tilesize;
     int iteroffset=row_iter*tilesize;
+    if (offsetdiag){
+        tileoffset+=diagstartidx+tilesize;
+    }
     
     
     for (int l=j;l<tilesize;l+=numthreads){
-        if (offsetdiag){
-            outs[i][l]=out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset];
-            outs[i+tilesize][l]=out[(i+diagstartidx+iteroffset)*size_in+l+diagstartidx+tileoffset];
-        } else {
-            outs[i][l]=out[(i+diagstartidx)*size_in+l+diagstartidx];
-            outs[i+tilesize][l]=out[(i+diagstartidx+iteroffset)*size_in+l+diagstartidx];
-        }
+        outs[i][l]=out[(i+diagstartidx)*size_out+l+tileoffset];
+        outs[i+tilesize][l]=out[(i+diagstartidx+iteroffset)*size_out+l+tileoffset];
         Qs[i][l]=in[(i+diagstartidx+iteroffset)*size_in+l+diagstartidx];
     }
 
-
     __syncthreads();
+
 
     for (int k=0;k<tilesize;k++){
         float tmp_sum = 0.0f;
@@ -198,8 +208,8 @@ __global__ void base_applyQt_doubletile( //aplies Qt (given by householder refle
     }
 
     for (int l=j;l<tilesize;l+=numthreads){
-        out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset]=outs[i][l];
-        out[(i+diagstartidx+iteroffset)*size_in+l+diagstartidx+tileoffset]=outs[i+tilesize][l];
+        out[(i+diagstartidx)*size_out+l+tileoffset]=outs[i][l];
+        out[(i+diagstartidx+iteroffset)*size_out+l+tileoffset]=outs[i+tilesize][l];
     }
 
 }
@@ -362,10 +372,10 @@ void launch_tiled_qr(
     int nb_blocks= size_i/tilesize;
     for(int iter=0;iter<nb_blocks-1;iter++){
         base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,iter,tau,a); 
-        base_applyQt_singletile<<<nb_blocks-1-iter,dim3(tilesize,numthreads)>>>(size_i,iter,true,tau,a,a); 
+        base_applyQt_singletile<<<nb_blocks-1-iter,dim3(tilesize,numthreads)>>>(size_i,size_i,iter,true,tau,a,a); 
         for (int row=1;row+iter<nb_blocks;row++){
             base_calcQR_doubletile<<<1,dim3(tilesize,tilesize)>>>(size_i,iter,row,tau,a);
-            base_applyQt_doubletile<<<nb_blocks-1-iter,dim3(tilesize,numthreads)>>>(size_i,iter,row,true,tau,a,a); 
+            base_applyQt_doubletile<<<nb_blocks-1-iter,dim3(tilesize,numthreads)>>>(size_i,size_i,iter,row,true,tau,a,a); 
         }
     }
     base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,nb_blocks-1,tau,a); 
@@ -373,17 +383,18 @@ void launch_tiled_qr(
     }
 
     void launch_mult_qt(
-        int32_t size_i,
+        int32_t size_k, int32_t size_i,  int32_t size_j,  
         float *a, float *tau, float *b) {
-            
-        if ( size_i%tilesize !=0 ){
+
+        if ( size_k%tilesize !=0 ){
                 throw std::invalid_argument( "Not implemented for this argument size" );
         }
-        int nb_blocks= size_i/tilesize;
-        for(int iter=0;iter<nb_blocks;iter++){
-            base_applyQt_singletile<<<1,dim3(tilesize,numthreads)>>>(size_i,iter,false,tau,a, b); 
-            for (int row=1;row+iter<nb_blocks;row++){
-                base_applyQt_doubletile<<<1,dim3(tilesize,numthreads)>>>(size_i,iter,false,row,tau,a, b); 
+        
+        for(int iter=0;iter<min(size_i,size_j)/tilesize;iter++){
+            base_applyQt_singletile<<<1,dim3(tilesize,numthreads)>>>(size_j,size_k,iter,false,tau,a, b); 
+            for (int row=1;row+iter<(size_i/tilesize);row++){
+
+                base_applyQt_doubletile<<<1,dim3(tilesize,numthreads)>>>(size_j,size_k,iter,row,false,tau,a, b); 
             }
         }
             
@@ -401,7 +412,7 @@ void launch_tiled_qr(
         int32_t size_i,
         float *a, float *tau) {
             base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,tau,a); 
-            base_applyQt_singletile<<<1,dim3(tilesize,numthreads)>>>(size_i,0,true,tau,a,a); 
+            base_applyQt_singletile<<<1,dim3(tilesize,numthreads)>>>(size_i,size_i,0,true,tau,a,a); 
 
 
     
@@ -419,9 +430,9 @@ void launch_tiled_qr(
             int32_t size_i,
             float *a, float *tau) {
                 base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,tau,a); 
-                base_applyQt_singletile<<<1,dim3(tilesize,numthreads)>>>(size_i,0,true,tau,a,a); 
+                base_applyQt_singletile<<<1,dim3(tilesize,numthreads)>>>(size_i,size_i,0,true,tau,a,a); 
                 base_calcQR_doubletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,1,tau,a);
-                base_applyQt_doubletile<<<1,dim3(tilesize,numthreads)>>>(size_i,0,1,true,tau,a,a); 
+                base_applyQt_doubletile<<<1,dim3(tilesize,numthreads)>>>(size_i,size_i,0,1,true,tau,a,a); 
                 base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,1,tau,a); 
         
             }
@@ -432,15 +443,7 @@ void launch_tiled_qr(
 
 ////////////////////////////////////////////////////////////////////////////////
 
-void print_matrix(int32_t n_row, int32_t n_col, std::vector<float> const &matrix) {
-    for (int32_t i = 0; i < n_row; i++) {
-        printf("    ");
-        for (int32_t j = 0; j < n_col; j++) {
-            printf("%10.5f ", matrix.at(i * n_col + j));
-        }
-        printf("\n");
-    }
-}
+
 enum class Phase {
     TEST,
     WARMUP,
@@ -513,20 +516,21 @@ TestData read_test_data(Phase phase,
                     std::to_string(size_j) + ".bin",
                 size_i * size_j);
         }
-        if (phase == Phase::BENCHMARK) {
-            if (data.x.find({size_i, size_j}) == data.x.end()) {
-                data.x[{size_i, size_j}] = read_data(
-                    path_prefix + "x_" + std::to_string(size_i)  + ".bin",
-                    size_i * tilesize);
-            }
-            
-
-            if (data.xref.find({size_i, size_j}) == data.xref.end()) {
-                data.xref[{size_i, size_j}] = read_data(
-                    path_prefix + "xmul_" + std::to_string(size_i)  + ".bin",
-                    size_i * tilesize);
-            }
+        if (data.x.find({size_i, size_j}) == data.x.end()) {
+            data.x[{size_i, size_j}] = read_data(
+                path_prefix + "x_" + std::to_string(size_i) +"_" +
+                std::to_string(size_j) + ".bin",
+                size_i * tilesize);
         }
+        
+
+        if (data.xref.find({size_i, size_j}) == data.xref.end()) {
+            data.xref[{size_i, size_j}] = read_data(
+                path_prefix + "xmul_" + std::to_string(size_i) +"_" +
+                std::to_string(size_j) + ".bin",
+                size_i * tilesize);
+        }
+        
             
 
     }
@@ -601,13 +605,13 @@ void run_config(
         }
     }
     
-    float rel_rmse = std::sqrt(mse) / (size_i * (size_j+1)/2);
+    float rel_rmse = std::sqrt(mse) / max(size_i,size_j);
 
     if (phase == Phase::BENCHMARK || phase == Phase::TEST ) {
         printf("   %8.02e", rel_rmse);
     }
 
-    if (rel_rmse > 1e-3) {
+    if ((rel_rmse > 1e-3 && size_i>=size_j) || rel_rmse!=rel_rmse ) {
         if (phase == Phase::BENCHMARK) {
             printf("  %9s  %7s", "-", "-");
         } else if (phase == Phase::TEST){
@@ -618,7 +622,7 @@ void run_config(
             printf("  obtained output:\n");
             print_matrix(size_i,  size_j, c_out_host);
         }
-    } else {
+    } else if (phase == Phase::BENCHMARK){
         double target_time_ms = 200.0;
         double elapsed_ms = benchmark_ms(
             target_time_ms,
@@ -630,79 +634,95 @@ void run_config(
                 Impl::run(size_j,  a_gpu, tau_gpu);
             });
 
-        if (phase == Phase::BENCHMARK) {
             printf(" %9.02f ", elapsed_ms);
             results.elapsed_ms[{size_i, size_j}] = elapsed_ms;
-        }
+
     }
 
     printf("\n");
-
-    if (phase != Phase::TEST){
-        auto const &x = data.x.at({size_i, size_j});
-        auto const &xref = data.xref.at({size_i, size_j});
-
-        float *x_gpu;
-        CUDA_CHECK(cudaMalloc(&x_gpu, size_i * tilesize * sizeof(float)));
-
-        CUDA_CHECK(cudaMemcpy(
-            x_gpu,
-            x.data(),
-            size_i * tilesize * sizeof(float),
-            cudaMemcpyHostToDevice));
-
-        if (phase == Phase::BENCHMARK) {
-            printf("  Qmul  %6d  %6d  ", size_i, size_j);
-        } else {
-            printf("  warmup  mul Qt   %6d ", size_i);
-        }
-
-        Impl::run_mulqt(size_i,   a_gpu, tau_gpu, x_gpu);
-
-        std::vector<float> x_out_host(size_i * tilesize * sizeof(float));
-        CUDA_CHECK(cudaMemcpy(
-            x_out_host.data(),
-            x_gpu,
-            size_i * tilesize* sizeof(float),
-            cudaMemcpyDeviceToHost));
-
-        mse = 0.0;
-        for (int32_t i = 0; i < size_i; ++i) {
-            for (int32_t j = 0; j < tilesize; ++j) {
-                float diff = abs(abs(x_out_host[i * tilesize + j]) - abs(xref[i * tilesize + j]))/abs(xref[i * tilesize + j]);
-                mse+= diff*diff;
-            }
-        }
-        
-        rel_rmse = std::sqrt(mse) / (size_i *tilesize);
-
-        if (phase == Phase::BENCHMARK  ) {
-            printf("   %8.02e", rel_rmse);
-        }
     
-        if (rel_rmse > 1e-3) {
-                printf("  %9s  %7s", "-", "-");
-        } else {
-            double target_time_ms = 200.0;
-            double elapsed_ms = benchmark_ms(
-                target_time_ms,
-                4,
-                [&]() {
-                    CUDA_CHECK(cudaMemcpy( x_gpu, x.data(), size_i * tilesize * sizeof(float),cudaMemcpyHostToDevice));
-                },
-                [&]() {
-                    Impl::run_mulqt(size_i,  a_gpu, tau_gpu, x_gpu);
-                });
-    
-            if (phase == Phase::BENCHMARK) {
-                printf(" %9.02f ", elapsed_ms);
-                results.elapsed_ms_mulx[{size_i}] = elapsed_ms;
-            }
-        }
+    auto const &x = data.x.at({size_i, size_j});
+    auto const &xref = data.xref.at({size_i, size_j});
 
-        printf("\n");
+    float *x_gpu;
+    CUDA_CHECK(cudaMalloc(&x_gpu, size_i * tilesize * sizeof(float)));
+
+    CUDA_CHECK(cudaMemcpy(
+        x_gpu,
+        x.data(),
+        size_i * tilesize * sizeof(float),
+        cudaMemcpyHostToDevice));
+
+    if (phase == Phase::BENCHMARK) {
+        printf("  Qmul  %6d  %6d  ", size_i, size_j);
+    } else {
+        printf("  warmup  mul Qt   %6d ", size_i);
     }
 
+    Impl::run_mulqt(tilesize, size_i,size_j, a_gpu, tau_gpu, x_gpu);
+
+
+    std::vector<float> x_out_host(size_i * tilesize * sizeof(float));
+    CUDA_CHECK(cudaMemcpy(
+        x_out_host.data(),
+        x_gpu,
+        size_i * tilesize* sizeof(float),
+        cudaMemcpyDeviceToHost));
+        
+    mse = 0.0;
+    for (int32_t i = 0; i < size_i; ++i) {
+        for (int32_t j = 0; j < tilesize; ++j) {
+            float diff = abs(abs(x_out_host[i * tilesize + j]) - abs(xref[i * tilesize + j]))/abs(xref[i * tilesize + j]);
+            mse+= diff*diff;
+        }
+    }
+    
+    rel_rmse = std::sqrt(mse) / max(size_i,tilesize);
+    if (size_i>=size_j){
+        rel_rmse=-1;
+    }
+    
+    if (phase == Phase::BENCHMARK  || phase == Phase::TEST  ) {
+        printf("   %8.02e", rel_rmse);
+    }
+
+    if (rel_rmse > 1e-3 || rel_rmse!=rel_rmse) {
+        if (phase == Phase::BENCHMARK) {
+            printf("  %9s  %7s", "-", "-");
+        } else if (phase == Phase::TEST){
+            printf("\n");
+            printf("  input :\n");
+            print_matrix(size_i, tilesize, x);
+            printf("\n");
+            printf("  input a:\n");
+            print_matrix(size_i, size_j, c_out_host);
+            printf("\n");
+            printf("  expected output:\n");
+            print_matrix(size_i, tilesize, xref);
+            printf("\n");
+            printf("  obtained output:\n");
+            print_matrix(size_i,  tilesize, x_out_host);
+        }
+    } else if (phase == Phase::BENCHMARK){
+        double target_time_ms = 200.0;
+        double elapsed_ms = benchmark_ms(
+            target_time_ms,
+            4,
+            [&]() {
+                CUDA_CHECK(cudaMemcpy( x_gpu, x.data(), size_i * tilesize * sizeof(float),cudaMemcpyHostToDevice));
+            },
+            [&]() {
+                Impl::run_mulqt(tilesize, size_i,size_j, a_gpu, tau_gpu, x_gpu);
+            });
+
+            printf(" %9.02f ", elapsed_ms);
+            results.elapsed_ms_mulx[{size_i}] = elapsed_ms;
+        
+    }
+
+    printf("\n");
+    
+    
    
 
 
@@ -760,9 +780,9 @@ struct QRbase {
     }
 
     static void
-    run_mulqt(int32_t size_i,
+    run_mulqt(int32_t size_k,int32_t size_i, int32_t size_j, 
         float *a, float *tau, float *b) {
-        qr_base::launch_mult_qt(size_i,a, tau, b) ;
+        qr_base::launch_mult_qt(size_k,size_i,size_j,a, tau, b) ;
     }
 
 
@@ -959,16 +979,17 @@ int main(int argc, char **argv) {
     }
 
     auto configs_test = std::vector<BenchmarkConfig>{
-        {{tilesize,tilesize}, {tilesize*2,tilesize},  {tilesize,tilesize*2}, {tilesize*2,tilesize*2}},
+        {{tilesize,tilesize}, {tilesize,2*tilesize},  {tilesize*2,tilesize}, {tilesize*2,tilesize*2}},
     };
     auto configs = std::vector<BenchmarkConfig>{
-        {{128,128},  {512,512}},
+        {{128,128},{512,512},{2048,2048}},
     };
 
     
     auto data = read_test_data(Phase::TEST, test_data_dir, configs_test);
-    run_all_impls(Phase::TEST, data, configs_test);
     
+    run_all_impls(Phase::TEST, data, configs_test);
+    /*
     data = read_test_data(Phase::BENCHMARK, test_data_dir, configs);
     run_all_impls(Phase::WARMUP, data, configs);
     auto results = run_all_impls(Phase::BENCHMARK, data, configs);
@@ -978,7 +999,7 @@ int main(int argc, char **argv) {
     for (int32_t j = 0; j < results.size(); ++j) {
             print_speedup(configs, results.at(j),  curesults);
     }
-
+    */
     
             
     //write_json_results("out/results.json", results);
