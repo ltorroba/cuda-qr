@@ -88,6 +88,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    const int warmup_trials = 100;
     const int num_trials = 100;
     // TODO: Fix for larger matrix sizes (e.g., 96)
     const int size_in = 1024;  // matrix size
@@ -144,9 +145,9 @@ int main(int argc, char **argv) {
     //   - Reference: Apply the Q' matrix to the tiles to the right of the diagonal and store the results
     //   - Custom: Call the kernel for this diagonal iter
     //   - Compare the results
-    for (int trial = 0; trial < num_trials; trial++) {
+    for (int trial = 0; trial < num_trials + warmup_trials; trial++) {
         // Print memory usage at start of each trial
-        if (memory_usage) {
+        if (memory_usage && trial >= warmup_trials) {
             size_t free_byte, total_byte;
             CHECK_CUDA(cudaMemGetInfo(&free_byte, &total_byte));
             float free_gb = free_byte / (1024.0 * 1024.0 * 1024.0);
@@ -246,9 +247,11 @@ int main(int argc, char **argv) {
                 auto& result = results[i];
                 
                 // Time the kernel
-                result.total_time += benchmark_kernel([&]() {
+                float local_time = benchmark_kernel([&]() {
                     kernel.kernel(size_in, diag_iter, d_tau, d_matrix_out);
                 });
+                if (trial >= warmup_trials)
+                    result.total_time += local_time;
                 
                 // Copy results to host for comparison
                 std::vector<float> host_custom(size_in * size_in);
@@ -258,26 +261,28 @@ int main(int argc, char **argv) {
                 
                 // Compare only the relevant tiles. We include the diagonal tiles since these should
                 // not be modified by the kernel
-                for (int tile = diag_iter; tile < size_in/tilesize; tile++) {
-                    for (int row = diag_iter * tilesize; row < (diag_iter + 1) * tilesize; row++) {
-                        for (int col = tile * tilesize; col < (tile + 1) * tilesize; col++) {
-                            int col_major_idx = col * size_in + row;
-                            int row_major_idx = row * size_in + col;
-                            float diff = std::abs(host_custom[row_major_idx] - host_ref[col_major_idx]);
-                            result.max_error = std::max(result.max_error, diff);
+                if (trial >= warmup_trials) {
+                    for (int tile = diag_iter; tile < size_in/tilesize; tile++) {
+                        for (int row = diag_iter * tilesize; row < (diag_iter + 1) * tilesize; row++) {
+                            for (int col = tile * tilesize; col < (tile + 1) * tilesize; col++) {
+                                int col_major_idx = col * size_in + row;
+                                int row_major_idx = row * size_in + col;
+                                float diff = std::abs(host_custom[row_major_idx] - host_ref[col_major_idx]);
+                                result.max_error = std::max(result.max_error, diff);
 
-                            // std::cout << "tile: " << tile << " row: " << row << " col: " << col << "\n";
-                            // std::cout << "host_custom[" << row_major_idx << "] = " << host_custom[row_major_idx] << "\n";
-                            // std::cout << "host_ref[" << col_major_idx << "] = " << host_ref[col_major_idx] << "\n";
+                                // std::cout << "tile: " << tile << " row: " << row << " col: " << col << "\n";
+                                // std::cout << "host_custom[" << row_major_idx << "] = " << host_custom[row_major_idx] << "\n";
+                                // std::cout << "host_ref[" << col_major_idx << "] = " << host_ref[col_major_idx] << "\n";
 
-                            if (diff > 1e-5 && verbose) {
-                                std::cout << "Large difference at tile (" 
-                                        << row/tilesize << "," << col/tilesize 
-                                        << ") rel_position (" << row % tilesize << "," << col % tilesize 
-                                        << ") abs_position (" << row << "," << col << ")\n"
-                                        << "): custom=" << host_custom[row_major_idx] 
-                                        << " ref=" << host_ref[col_major_idx] 
-                                        << " diff=" << diff << "\n";
+                                if (diff > 1e-5 && verbose) {
+                                    std::cout << "Large difference at tile ("
+                                            << row/tilesize << "," << col/tilesize
+                                            << ") rel_position (" << row % tilesize << "," << col % tilesize
+                                            << ") abs_position (" << row << "," << col << ")\n"
+                                            << "): custom=" << host_custom[row_major_idx]
+                                            << " ref=" << host_ref[col_major_idx]
+                                            << " diff=" << diff << "\n";
+                                }
                             }
                         }
                     }
