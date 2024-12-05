@@ -289,6 +289,11 @@ int main(int argc, char **argv) {
                 }
             }
         }
+
+        // Print a message after the warmup phase is complete
+        if (trial == warmup_trials - 1) {
+            std::cout << "Warmup phase completed. Starting timed trials...\n";
+        }
     }
     
     // Print results
