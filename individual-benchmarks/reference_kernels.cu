@@ -16,9 +16,11 @@ __host__ __device__ __forceinline__ void swap_pointers(T** a, T** b) {
 template <int tilesize, int numthreads>
 __global__ void base_applyQt_singletile_evelyne( //aplies Qt (given by householder reflectors on diagonal tile k) to the remainder of the row
     int size_in,
+    int size_out,
     int diag_iter,
+    bool offsetdiag,
     float const *tau,
-    float *out) {
+    float *in, float *out) {
     int g = blockIdx.x;
     int i = threadIdx.x;
     int j = threadIdx.y;
@@ -26,14 +28,15 @@ __global__ void base_applyQt_singletile_evelyne( //aplies Qt (given by household
     __shared__ float Qs[tilesize][tilesize];
     __shared__ float cache[tilesize][numthreads];
     int diagstartidx=diag_iter*tilesize;
-    int tileoffset=(1+g)*tilesize;
-
-    if (diag_iter == size_in/tilesize - 1)
-        return;
+    int tileoffset=(g)*tilesize;
+    if (offsetdiag){
+        tileoffset+=diagstartidx+tilesize;
+    }
+    
     
     for (int l=j;l<tilesize;l+=numthreads){
-        outs[i][l]=out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset];
-        Qs[i][l]=out[(i+diagstartidx)*size_in+l+diagstartidx];
+        outs[i][l]=out[(i+diagstartidx)*size_out+l+tileoffset];
+        Qs[i][l]=in[(i+diagstartidx)*size_in+l+diagstartidx];
     }
     
 
@@ -61,7 +64,7 @@ __global__ void base_applyQt_singletile_evelyne( //aplies Qt (given by household
     }
 
     for (int l=j;l<tilesize;l+=numthreads){
-        out[(i+diagstartidx)*size_in+l+diagstartidx+tileoffset]=outs[i][l];
+        out[(i+diagstartidx)*size_out+l+tileoffset]=outs[i][l];
     }
 }
 
@@ -75,7 +78,7 @@ void launch_base_applyQt_singletile_evelyne(int size_in, int diag_iter, float co
     if (num_blocks <= 0)
         return;
 
-    base_applyQt_singletile_evelyne<tilesize, numthreads><<<num_blocks, dim3(tilesize, numthreads)>>>(size_in, diag_iter, tau, out); 
+    base_applyQt_singletile_evelyne<tilesize, numthreads><<<num_blocks, dim3(tilesize, numthreads)>>>(size_in, size_in, diag_iter, true, tau, out, out);
 }
 
 template <int tile_size>
