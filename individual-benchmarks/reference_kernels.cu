@@ -32,13 +32,13 @@ __global__ void base_applyQt_singletile_evelyne( //aplies Qt (given by household
     if (offsetdiag){
         tileoffset+=diagstartidx+tilesize;
     }
-    
-    
+
+
     for (int l=j;l<tilesize;l+=numthreads){
         outs[i][l]=out[(i+diagstartidx)*size_out+l+tileoffset];
         Qs[i][l]=in[(i+diagstartidx)*size_in+l+diagstartidx];
     }
-    
+
 
     __syncthreads();
 
@@ -82,11 +82,10 @@ void launch_base_applyQt_singletile_evelyne(int size_in, int diag_iter, float co
 }
 
 template <int tile_size>
-__global__ void base_applyQt_singletile(int size_in, int diag_iter, float const *tau, float *out) {
+__global__ void base_applyQt_singletile(int size_X, int row_stride_X, int row_stride_Q, float const *tau, float const* Q, float *X) {
     auto num_threads = gridDim.x * blockDim.x;
     auto thread_idx = blockDim.x * blockIdx.x + threadIdx.x;
-    auto columns_to_skip = (diag_iter + 1) * tile_size;
-    auto columns_per_thread = ceil_div(size_in - columns_to_skip, num_threads);
+    auto columns_per_thread = ceil_div(size_X, num_threads);
 
     // TODO: Use all threads in block to load the columns we will be processing using a better
     //       access pattern
@@ -95,25 +94,25 @@ __global__ void base_applyQt_singletile(int size_in, int diag_iter, float const 
     float householder_reflectors[tile_size][tile_size];
     float taus[tile_size];
     for (auto reflector_idx = 0; reflector_idx < tile_size; reflector_idx++) {
-        taus[reflector_idx] = tau[diag_iter * size_in + reflector_idx];
+        taus[reflector_idx] = tau[reflector_idx];
         for (auto element_idx = reflector_idx + 1; element_idx < tile_size; element_idx++) {
-            auto householder_reflector_i = diag_iter * tile_size + element_idx;
-            auto householder_reflector_j = diag_iter * tile_size + reflector_idx;
-            householder_reflectors[element_idx][reflector_idx] = out[householder_reflector_i * size_in + householder_reflector_j];
+            auto householder_reflector_i = element_idx;
+            auto householder_reflector_j = reflector_idx;
+            householder_reflectors[element_idx][reflector_idx] = Q[householder_reflector_i * row_stride_Q + householder_reflector_j];
         }
     }
 
     float current_column[tile_size];
     for (auto current_column_idx = 0; current_column_idx < columns_per_thread; current_column_idx++) {
-        auto current_column_j = columns_to_skip + thread_idx * columns_per_thread + current_column_idx;
+        auto current_column_j = thread_idx * columns_per_thread + current_column_idx;
 
-        if (current_column_j >= size_in)
+        if (current_column_j >= size_X)
             break;
 
         // Load current column we are processing
         for (auto local_i = 0; local_i < tile_size; local_i++) {
-            auto current_column_i = diag_iter * tile_size + local_i;
-            current_column[local_i] = out[current_column_i * size_in + current_column_j];
+            auto current_column_i = local_i;
+            current_column[local_i] = X[current_column_i * row_stride_X + current_column_j];
         }
 
         // Process current column by applying householder reflectors in reverse order
@@ -142,35 +141,42 @@ __global__ void base_applyQt_singletile(int size_in, int diag_iter, float const 
 
         // Write out processed column
         for (auto local_i = 0; local_i < tile_size; local_i++) {
-            auto current_column_i = diag_iter * tile_size + local_i;
-            out[current_column_i * size_in + current_column_j] = current_column[local_i];
+            auto current_column_i = local_i;
+            X[current_column_i * row_stride_X + current_column_j] = current_column[local_i];
         }
     }
 }
 
 void launch_base_applyQt_singletile(int size_in, int diag_iter, float const *tau, float *out) {
     const auto tilesize = 32;
-    base_applyQt_singletile<tilesize><<<tilesize, tilesize>>>(size_in, diag_iter, tau, out); 
+    auto size_X = size_in - (diag_iter + 1) * tilesize;
+    auto row_stride_Q = size_in;
+    auto row_stride_X = size_in;
+    auto Q = &out[diag_iter * tilesize * size_in + diag_iter * tilesize];
+    auto X = &out[diag_iter * tilesize * size_in + (diag_iter + 1) * tilesize];
+    auto taus = &tau[diag_iter * size_in];
+
+    base_applyQt_singletile<tilesize><<<tilesize, tilesize>>>(size_X, row_stride_X, row_stride_Q, taus, Q, X);
 }
 
 
 void reference_applyQt(int size_in, int diag_iter, const float* tau, float* matrix) {
     cusolverDnHandle_t handle;
     CHECK_CUSOLVER(cusolverDnCreate(&handle));
-    
+
     int tilesize = 32;  // match the original implementation
     int diagstartidx = diag_iter * tilesize;
 
     const float* taus = &tau[diag_iter * size_in];
-    
+
     // We need:
     // 1. The Householder vectors (from the diagonal tile)
     // 2. The part of the matrix we're updating
-    
+
     // First, extract the Householder vectors from the diagonal tile
     float* householder_vectors;
     CHECK_CUDA(cudaMalloc(&householder_vectors, tilesize * tilesize * sizeof(float)));
-    
+
     // Copy the diagonal tile (contains the Householder vectors)
     for(int j = 0; j < tilesize; j++) {
         CHECK_CUDA(cudaMemcpy(householder_vectors + j * tilesize,
@@ -178,7 +184,7 @@ void reference_applyQt(int size_in, int diag_iter, const float* tau, float* matr
                              tilesize * sizeof(float),
                              cudaMemcpyDeviceToDevice));
     }
-    
+
     // For each tile to the right of the diagonal
     for(int g = 1; g < (size_in - diagstartidx) / tilesize; g++) {
         // Extract the tile we're updating
@@ -190,7 +196,7 @@ void reference_applyQt(int size_in, int diag_iter, const float* tau, float* matr
                                  tilesize * sizeof(float),
                                  cudaMemcpyDeviceToDevice));
         }
-        
+
         // Query workspace size
         int lwork;
         CHECK_CUSOLVER(cusolverDnSormqr_bufferSize(
@@ -205,13 +211,13 @@ void reference_applyQt(int size_in, int diag_iter, const float* tau, float* matr
             work_tile,          // matrix to update
             tilesize,           // leading dimension
             &lwork));
-            
+
         // Allocate workspace
         float* workspace;
         int* devInfo;
         CHECK_CUDA(cudaMalloc(&workspace, lwork * sizeof(float)));
         CHECK_CUDA(cudaMalloc(&devInfo, sizeof(int)));
-        
+
         // Apply Qt to the tile
         CHECK_CUSOLVER(cusolverDnSormqr(
             handle,
@@ -225,7 +231,7 @@ void reference_applyQt(int size_in, int diag_iter, const float* tau, float* matr
             work_tile,          // matrix to update
             tilesize,           // leading dimension
             workspace, lwork, devInfo));
-            
+
         // Copy result back
         for(int j = 0; j < tilesize; j++) {
             CHECK_CUDA(cudaMemcpy(matrix + (diagstartidx + j + g * tilesize) * size_in + diagstartidx,
@@ -233,13 +239,13 @@ void reference_applyQt(int size_in, int diag_iter, const float* tau, float* matr
                                  tilesize * sizeof(float),
                                  cudaMemcpyDeviceToDevice));
         }
-        
+
         // Cleanup this iteration
         CHECK_CUDA(cudaFree(workspace));
         CHECK_CUDA(cudaFree(devInfo));
         CHECK_CUDA(cudaFree(work_tile));
     }
-    
+
     // Final cleanup
     CHECK_CUDA(cudaFree(householder_vectors));
     CHECK_CUSOLVER(cusolverDnDestroy(handle));
@@ -249,20 +255,20 @@ void reference_applyQt(int size_in, int diag_iter, const float* tau, float* matr
 void reference_applyQt_fast(int size_in, int diag_iter, const float* tau, float* matrix) {
     cusolverDnHandle_t handle;
     CHECK_CUSOLVER(cusolverDnCreate(&handle));
-    
+
     int tilesize = 32;  // match the original implementation
     int diagstartidx = diag_iter * tilesize;
 
     const float* taus = &tau[diag_iter * size_in];
-    
+
     // We need:
     // 1. The Householder vectors (from the diagonal tile)
     // 2. The part of the matrix we're updating
-    
+
     // First, extract the Householder vectors from the diagonal tile
     float* householder_vectors;
     CHECK_CUDA(cudaMalloc(&householder_vectors, tilesize * tilesize * sizeof(float)));
-    
+
     // Copy the diagonal tile (contains the Householder vectors)
     for(int j = 0; j < tilesize; j++) {
         CHECK_CUDA(cudaMemcpyAsync(householder_vectors + j * tilesize,
@@ -270,7 +276,7 @@ void reference_applyQt_fast(int size_in, int diag_iter, const float* tau, float*
                              tilesize * sizeof(float),
                              cudaMemcpyDeviceToDevice));
     }
-    
+
     // For each tile to the right of the diagonal
     for(int g = 1; g < (size_in - diagstartidx) / tilesize; g++) {
         // Extract the tile we're updating
@@ -282,7 +288,7 @@ void reference_applyQt_fast(int size_in, int diag_iter, const float* tau, float*
                                  tilesize * sizeof(float),
                                  cudaMemcpyDeviceToDevice));
         }
-        
+
         // Query workspace size
         int lwork;
         CHECK_CUSOLVER(cusolverDnSormqr_bufferSize(
@@ -297,13 +303,13 @@ void reference_applyQt_fast(int size_in, int diag_iter, const float* tau, float*
             work_tile,          // matrix to update
             tilesize,           // leading dimension
             &lwork));
-            
+
         // Allocate workspace
         float* workspace;
         int* devInfo;
         CHECK_CUDA(cudaMalloc(&workspace, lwork * sizeof(float)));
         CHECK_CUDA(cudaMalloc(&devInfo, sizeof(int)));
-        
+
         // Apply Qt to the tile
         CHECK_CUSOLVER(cusolverDnSormqr(
             handle,
@@ -317,7 +323,7 @@ void reference_applyQt_fast(int size_in, int diag_iter, const float* tau, float*
             work_tile,          // matrix to update
             tilesize,           // leading dimension
             workspace, lwork, devInfo));
-            
+
         // Copy result back
         for(int j = 0; j < tilesize; j++) {
             CHECK_CUDA(cudaMemcpy(matrix + (diagstartidx + j + g * tilesize) * size_in + diagstartidx,
@@ -325,13 +331,13 @@ void reference_applyQt_fast(int size_in, int diag_iter, const float* tau, float*
                                  tilesize * sizeof(float),
                                  cudaMemcpyDeviceToDevice));
         }
-        
+
         // Cleanup this iteration
         CHECK_CUDA(cudaFree(workspace));
         CHECK_CUDA(cudaFree(devInfo));
         CHECK_CUDA(cudaFree(work_tile));
     }
-    
+
     // Final cleanup
     CHECK_CUDA(cudaFree(householder_vectors));
     CHECK_CUSOLVER(cusolverDnDestroy(handle));
