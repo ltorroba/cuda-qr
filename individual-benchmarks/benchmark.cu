@@ -78,6 +78,9 @@ struct QtKernel {
 int main(int argc, char **argv) {
     bool verbose = false;
     bool memory_usage = false;
+    int warmup_trials = 100;
+    int num_trials = 100;
+    int size_in = 1024;
     for (int i = 1; i < argc; i++) {
         if (std::string(argv[i]) == "--verbose") {
             verbose = true;
@@ -85,13 +88,15 @@ int main(int argc, char **argv) {
         } else if (std::string(argv[i]) == "--memory-usage") {
             memory_usage = true;
             break;
+        } else if (std::string(argv[i]) == "--size") {
+            size_in = std::atoi(argv[++i]);
+        } else if (std::string(argv[i]) == "--trials") {
+            num_trials = std::atoi(argv[++i]);
+        } else if (std::string(argv[i]) == "--warmup") {
+            warmup_trials = std::atoi(argv[++i]);
         }
     }
 
-    const int warmup_trials = 100;
-    const int num_trials = 100;
-    // TODO: Fix for larger matrix sizes (e.g., 96)
-    const int size_in = 1024;  // matrix size
     constexpr int tilesize = 32;  // tile size
     constexpr int numthreads = 4;  // compile-time constant
     
@@ -293,6 +298,11 @@ int main(int argc, char **argv) {
         // Print a message after the warmup phase is complete
         if (trial == warmup_trials - 1) {
             std::cout << "Warmup phase completed. Starting timed trials...\n";
+        }
+
+        // Print a progress message every 100 trials
+        if (trial % 100 == 0) {
+            std::cout << "Trial " << trial << " completed\n";
         }
     }
     
