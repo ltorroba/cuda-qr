@@ -84,10 +84,8 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (std::string(argv[i]) == "--verbose") {
             verbose = true;
-            break;
         } else if (std::string(argv[i]) == "--memory-usage") {
             memory_usage = true;
-            break;
         } else if (std::string(argv[i]) == "--size") {
             size_in = std::atoi(argv[++i]);
         } else if (std::string(argv[i]) == "--trials") {
