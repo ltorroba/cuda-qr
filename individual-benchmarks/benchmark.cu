@@ -22,50 +22,6 @@ double benchmark_kernel(F func) {
     return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
 }
 
-void convert_matrix_major(const float* input_d,
-                         float* output_d,
-                         int m,      // rows
-                         int n,      // cols
-                         bool to_column_major = true) {
-    cublasHandle_t handle;
-    CHECK_CUBLAS(cublasCreate(&handle));
-
-    const float alpha = 1.0f;
-    const float beta = 0.0f;
-
-    if (to_column_major) {
-        // Converting row-major to column-major
-        CHECK_CUBLAS(cublasSgeam(handle,
-                                CUBLAS_OP_T,    // transpose
-                                CUBLAS_OP_N,    // no-op
-                                m, n,           // output dimensions
-                                &alpha,
-                                input_d,        // input (viewed as n x m by cuBLAS)
-                                n,              // leading dimension of input
-                                &beta,
-                                nullptr,        // no B matrix
-                                m,              // ldb (unused)
-                                output_d,       // output
-                                m));            // leading dimension of output
-    } else {
-        // Converting column-major to row-major
-        CHECK_CUBLAS(cublasSgeam(handle,
-                                CUBLAS_OP_T,    // transpose
-                                CUBLAS_OP_N,    // no-op
-                                n, m,           // output dimensions (swapped)
-                                &alpha,
-                                input_d,        // input
-                                m,              // leading dimension of input
-                                &beta,
-                                nullptr,        // no B matrix
-                                n,              // ldb (unused)
-                                output_d,       // output
-                                n));            // leading dimension of output
-    }
-
-    CHECK_CUBLAS(cublasDestroy(handle));
-}
-
 struct QtKernel {
     std::string name;
     std::function<void*(int, int, const float*, float*)> preamble;  // Returns workspace pointer
@@ -136,24 +92,18 @@ int main(int argc, char **argv) {
         QtKernel("Improved (Lucas)",
             launch_base_applyQt_singletile
         ),
-        QtKernel("Reference Implementation",
+        QtKernel("cuSOLVER (Fast)",
             // Preamble
             [](int size_in, int diag_iter, const float* tau, float* matrix_out) -> void* {
-                float* matrix_out_col_major;
-                CHECK_CUDA(cudaMalloc(&matrix_out_col_major, size_in * size_in * sizeof(float)));
-                convert_matrix_major(matrix_out, matrix_out_col_major, size_in, size_in);
-                return matrix_out_col_major;
+                return reference_applyQt_fast_preamble(size_in, diag_iter, tau, matrix_out);
             },
             // Kernel
             [](int size_in, int diag_iter, const float* tau, float* matrix_out, void* workspace) {
-                float* matrix_out_col_major = static_cast<float*>(workspace);
-                reference_applyQt(size_in, diag_iter, tau, matrix_out_col_major);
+                reference_applyQt_fast(size_in, diag_iter, tau, matrix_out, workspace);
             },
             // Postamble
             [](int size_in, int diag_iter, const float* tau, float* matrix_out, void* workspace) {
-                float* matrix_out_col_major = static_cast<float*>(workspace);
-                convert_matrix_major(matrix_out_col_major, matrix_out, size_in, size_in, false);
-                CHECK_CUDA(cudaFree(matrix_out_col_major));
+                reference_applyQt_fast_postamble(size_in, diag_iter, tau, matrix_out, workspace);
             }
         )
     };

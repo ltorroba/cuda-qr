@@ -251,94 +251,128 @@ void reference_applyQt(int size_in, int diag_iter, const float* tau, float* matr
     CHECK_CUSOLVER(cusolverDnDestroy(handle));
 }
 
-
-void reference_applyQt_fast(int size_in, int diag_iter, const float* tau, float* matrix) {
+struct reference_applyQt_fast_workspace {
     cusolverDnHandle_t handle;
-    CHECK_CUSOLVER(cusolverDnCreate(&handle));
+    float* householder_vectors;
+    float* input;
+    const float* taus;
+    float* workspace;
+    int* devInfo;
+    float* matrix_col_major;
+    int lwork;
+};
+
+void* reference_applyQt_fast_preamble(int size_in, int diag_iter, const float* tau, float* matrix) {
+    float* matrix_col_major;
+    CHECK_CUDA(cudaMalloc(&matrix_col_major, size_in * size_in * sizeof(float)));
+    convert_matrix_major(matrix, matrix_col_major, size_in, size_in);
 
     int tilesize = 32;  // match the original implementation
     int diagstartidx = diag_iter * tilesize;
 
+    cusolverDnHandle_t handle;
+    CHECK_CUSOLVER(cusolverDnCreate(&handle));
+
     const float* taus = &tau[diag_iter * size_in];
 
-    // We need:
-    // 1. The Householder vectors (from the diagonal tile)
-    // 2. The part of the matrix we're updating
-
-    // First, extract the Householder vectors from the diagonal tile
+    // Copy the diagonal tile (contains the Householder vectors)
     float* householder_vectors;
     CHECK_CUDA(cudaMalloc(&householder_vectors, tilesize * tilesize * sizeof(float)));
 
-    // Copy the diagonal tile (contains the Householder vectors)
     for(int j = 0; j < tilesize; j++) {
         CHECK_CUDA(cudaMemcpyAsync(householder_vectors + j * tilesize,
-                             matrix + (diagstartidx + j) * size_in + diagstartidx,
+                             matrix_col_major + (diagstartidx + j) * size_in + diagstartidx,
                              tilesize * sizeof(float),
                              cudaMemcpyDeviceToDevice));
     }
 
-    // For each tile to the right of the diagonal
-    for(int g = 1; g < (size_in - diagstartidx) / tilesize; g++) {
-        // Extract the tile we're updating
-        float* work_tile;
-        CHECK_CUDA(cudaMalloc(&work_tile, tilesize * tilesize * sizeof(float)));
-        for(int j = 0; j < tilesize; j++) {
-            CHECK_CUDA(cudaMemcpy(work_tile + j * tilesize,
-                                 matrix + (diagstartidx + j + g * tilesize) * size_in + diagstartidx,
+    // Copy everything to the right of the diagonal tile
+    float* input;
+    CHECK_CUDA(cudaMalloc(&input, (size_in - diagstartidx - tilesize) * tilesize * sizeof(float)));
+    for(int j = 0; j < size_in - diagstartidx - tilesize; j++) {
+        CHECK_CUDA(cudaMemcpyAsync(input + j * tilesize,
+                                 matrix_col_major + (diagstartidx + j + tilesize) * size_in + diagstartidx,
                                  tilesize * sizeof(float),
                                  cudaMemcpyDeviceToDevice));
-        }
-
-        // Query workspace size
-        int lwork;
-        CHECK_CUSOLVER(cusolverDnSormqr_bufferSize(
-            handle,
-            CUBLAS_SIDE_LEFT,   // apply Q from the left
-            CUBLAS_OP_T,        // apply Q transpose
-            tilesize, tilesize, // dimensions of the tile
-            tilesize,           // number of elementary reflectors
-            householder_vectors, // the reflectors
-            tilesize,           // leading dimension
-            taus,               // tau values
-            work_tile,          // matrix to update
-            tilesize,           // leading dimension
-            &lwork));
-
-        // Allocate workspace
-        float* workspace;
-        int* devInfo;
-        CHECK_CUDA(cudaMalloc(&workspace, lwork * sizeof(float)));
-        CHECK_CUDA(cudaMalloc(&devInfo, sizeof(int)));
-
-        // Apply Qt to the tile
-        CHECK_CUSOLVER(cusolverDnSormqr(
-            handle,
-            CUBLAS_SIDE_LEFT,   // apply Q from the left
-            CUBLAS_OP_T,        // apply Q transpose
-            tilesize, tilesize, // dimensions of the tile
-            tilesize,           // number of elementary reflectors
-            householder_vectors, // the reflectors
-            tilesize,           // leading dimension
-            taus,               // tau values
-            work_tile,          // matrix to update
-            tilesize,           // leading dimension
-            workspace, lwork, devInfo));
-
-        // Copy result back
-        for(int j = 0; j < tilesize; j++) {
-            CHECK_CUDA(cudaMemcpy(matrix + (diagstartidx + j + g * tilesize) * size_in + diagstartidx,
-                                 work_tile + j * tilesize,
-                                 tilesize * sizeof(float),
-                                 cudaMemcpyDeviceToDevice));
-        }
-
-        // Cleanup this iteration
-        CHECK_CUDA(cudaFree(workspace));
-        CHECK_CUDA(cudaFree(devInfo));
-        CHECK_CUDA(cudaFree(work_tile));
     }
 
-    // Final cleanup
-    CHECK_CUDA(cudaFree(householder_vectors));
-    CHECK_CUSOLVER(cusolverDnDestroy(handle));
+    // Allocate workspace
+    int lwork;
+    CHECK_CUSOLVER(cusolverDnSormqr_bufferSize(
+        handle,
+        CUBLAS_SIDE_LEFT,   // apply Q from the left
+        CUBLAS_OP_T,        // apply Q transpose
+        tilesize, size_in - diagstartidx - tilesize, // dimensions of the tile
+        tilesize,           // number of elementary reflectors
+        householder_vectors, // the reflectors
+        tilesize,           // leading dimension
+        taus,               // tau values
+        input,          // matrix to update
+        tilesize,        // leading dimension
+        &lwork));
+
+    // Allocate workspace
+    float* workspace;
+    int* devInfo;
+    CHECK_CUDA(cudaMalloc(&workspace, lwork * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&devInfo, sizeof(int)));
+
+    reference_applyQt_fast_workspace* kernel_workspace = new reference_applyQt_fast_workspace();
+    kernel_workspace->handle = handle;
+    kernel_workspace->householder_vectors = householder_vectors;
+    kernel_workspace->input = input;
+    kernel_workspace->workspace = workspace;
+    kernel_workspace->devInfo = devInfo;
+    kernel_workspace->matrix_col_major = matrix_col_major;
+    kernel_workspace->taus = taus;
+    kernel_workspace->lwork = lwork;
+    return kernel_workspace;
+}
+
+void reference_applyQt_fast(int size_in, int diag_iter, const float* tau, float* matrix, void* workspace_ptr) {
+    reference_applyQt_fast_workspace* workspace = static_cast<reference_applyQt_fast_workspace*>(workspace_ptr);
+
+    int tilesize = 32;  // match the original implementation
+    int diagstartidx = diag_iter * tilesize;
+
+    const float* taus = workspace->taus;
+
+    CHECK_CUSOLVER(cusolverDnSormqr(
+        workspace->handle,
+        CUBLAS_SIDE_LEFT,   // apply Q from the left
+        CUBLAS_OP_T,        // apply Q transpose
+        tilesize, size_in - diagstartidx - tilesize, // dimensions of the tile
+        tilesize,           // number of elementary reflectors
+        workspace->householder_vectors, // the reflectors
+        tilesize,           // leading dimension
+        taus,               // tau values
+        workspace->input,          // matrix to update
+        tilesize,        // leading dimension
+        workspace->workspace, workspace->lwork, workspace->devInfo));
+}
+
+void reference_applyQt_fast_postamble(int size_in, int diag_iter, const float* tau, float* matrix, void* workspace_ptr) {
+    int tilesize = 32;  // match the original implementation
+    int diagstartidx = diag_iter * tilesize;
+
+    reference_applyQt_fast_workspace* workspace = static_cast<reference_applyQt_fast_workspace*>(workspace_ptr);
+
+    // Copy input back into matrix
+    for(int j = 0; j < size_in - diagstartidx - tilesize; j++) {
+        CHECK_CUDA(cudaMemcpyAsync(workspace->matrix_col_major + (diagstartidx + j + tilesize) * size_in + diagstartidx,
+                                 workspace->input + j * tilesize,
+                                 tilesize * sizeof(float),
+                                 cudaMemcpyDeviceToDevice));
+    }
+
+    convert_matrix_major(workspace->matrix_col_major, matrix, size_in, size_in, false);
+    cudaDeviceSynchronize();
+
+    CHECK_CUDA(cudaFree(workspace->input));
+    CHECK_CUDA(cudaFree(workspace->householder_vectors));
+    CHECK_CUDA(cudaFree(workspace->workspace));
+    CHECK_CUDA(cudaFree(workspace->devInfo));
+    CHECK_CUDA(cudaFree(workspace->matrix_col_major));
+    CHECK_CUSOLVER(cusolverDnDestroy(workspace->handle));
+    delete workspace;
 }

@@ -66,7 +66,7 @@
         printf("Kernel Error: %s:%d, %s\n", __FILE__, __LINE__, cudaGetErrorString(error)); \
         exit(EXIT_FAILURE); \
     } \
-} 
+}
 
 #define CHECK_CURAND(call) { \
     const curandStatus_t status = call; \
@@ -74,4 +74,48 @@
         printf("cuRAND Error: %s:%d, status: %d\n", __FILE__, __LINE__, status); \
         exit(EXIT_FAILURE); \
     } \
+}
+
+inline void convert_matrix_major(const float* input_d,
+                         float* output_d,
+                         int m,      // rows
+                         int n,      // cols
+                         bool to_column_major = true) {
+    cublasHandle_t handle;
+    CHECK_CUBLAS(cublasCreate(&handle));
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+
+    if (to_column_major) {
+        // Converting row-major to column-major
+        CHECK_CUBLAS(cublasSgeam(handle,
+                                CUBLAS_OP_T,    // transpose
+                                CUBLAS_OP_N,    // no-op
+                                m, n,           // output dimensions
+                                &alpha,
+                                input_d,        // input (viewed as n x m by cuBLAS)
+                                n,              // leading dimension of input
+                                &beta,
+                                nullptr,        // no B matrix
+                                m,              // ldb (unused)
+                                output_d,       // output
+                                m));            // leading dimension of output
+    } else {
+        // Converting column-major to row-major
+        CHECK_CUBLAS(cublasSgeam(handle,
+                                CUBLAS_OP_T,    // transpose
+                                CUBLAS_OP_N,    // no-op
+                                n, m,           // output dimensions (swapped)
+                                &alpha,
+                                input_d,        // input
+                                m,              // leading dimension of input
+                                &beta,
+                                nullptr,        // no B matrix
+                                n,              // ldb (unused)
+                                output_d,       // output
+                                n));            // leading dimension of output
+    }
+
+    CHECK_CUBLAS(cublasDestroy(handle));
 }
