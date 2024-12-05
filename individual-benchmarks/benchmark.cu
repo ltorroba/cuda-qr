@@ -32,7 +32,7 @@ void convert_matrix_major(const float* input_d,
 
     const float alpha = 1.0f;
     const float beta = 0.0f;
-    
+
     if (to_column_major) {
         // Converting row-major to column-major
         CHECK_CUBLAS(cublasSgeam(handle,
@@ -68,11 +68,29 @@ void convert_matrix_major(const float* input_d,
 
 struct QtKernel {
     std::string name;
-    std::function<void(int, int, const float*, float*)> kernel;
-    
+    std::function<void*(int, int, const float*, float*)> preamble;  // Returns workspace pointer
+    std::function<void(int, int, const float*, float*, void*)> kernel;
+    std::function<void(int, int, const float*, float*, void*)> postamble;  // Can modify out if needed
+
+    // Constructor for backward compatibility
     QtKernel(const std::string& n,
              std::function<void(int, int, const float*, float*)> k)
-        : name(n), kernel(k) {}
+        : name(n)
+        , preamble([](int, int, const float*, float*) -> void* { return nullptr; })
+        , kernel([k](int size_in, int diag_iter, const float* tau, float* out, void*) {
+            k(size_in, diag_iter, tau, out);
+          })
+        , postamble([](int, int, const float*, float*, void*) {}) {}
+
+    // Constructor for full functionality
+    QtKernel(const std::string& n,
+             std::function<void*(int, int, const float*, float*)> pre,
+             std::function<void(int, int, const float*, float*, void*)> k,
+             std::function<void(int, int, const float*, float*, void*)> post)
+        : name(n)
+        , preamble(pre)
+        , kernel(k)
+        , postamble(post) {}
 };
 
 int main(int argc, char **argv) {
@@ -97,7 +115,7 @@ int main(int argc, char **argv) {
 
     constexpr int tilesize = 32;  // tile size
     constexpr int numthreads = 4;  // compile-time constant
-    
+
     // Initialize CUDA resources
     cusolverDnHandle_t solver_handle;
     CHECK_CUSOLVER(cusolverDnCreate(&solver_handle));
@@ -119,15 +137,21 @@ int main(int argc, char **argv) {
             launch_base_applyQt_singletile
         ),
         QtKernel("Reference Implementation",
-            // TODO: This is unfair to cuBLAS; should use efficient kernel & in col major
-            // TODO: Maybe we could introduce optional preamble and postamble functions, with
-            //       a shared pointer between them?
-            [&](int size_in, int diag_iter, const float* tau, float* matrix_out) {
-                // Allocate memory for column major result
+            // Preamble
+            [](int size_in, int diag_iter, const float* tau, float* matrix_out) -> void* {
                 float* matrix_out_col_major;
                 CHECK_CUDA(cudaMalloc(&matrix_out_col_major, size_in * size_in * sizeof(float)));
                 convert_matrix_major(matrix_out, matrix_out_col_major, size_in, size_in);
+                return matrix_out_col_major;
+            },
+            // Kernel
+            [](int size_in, int diag_iter, const float* tau, float* matrix_out, void* workspace) {
+                float* matrix_out_col_major = static_cast<float*>(workspace);
                 reference_applyQt(size_in, diag_iter, tau, matrix_out_col_major);
+            },
+            // Postamble
+            [](int size_in, int diag_iter, const float* tau, float* matrix_out, void* workspace) {
+                float* matrix_out_col_major = static_cast<float*>(workspace);
                 convert_matrix_major(matrix_out_col_major, matrix_out, size_in, size_in, false);
                 CHECK_CUDA(cudaFree(matrix_out_col_major));
             }
@@ -172,7 +196,7 @@ int main(int argc, char **argv) {
             // Extract the diagonal tile
             float* diag_tile;
             CHECK_CUDA(cudaMalloc(&diag_tile, tilesize * tilesize * sizeof(float)));
-            
+
             // Copy the diagonal tile from the matrix
             for(int j = 0; j < tilesize; j++) {
                 CHECK_CUDA(cudaMemcpy(diag_tile + j * tilesize,
@@ -180,11 +204,11 @@ int main(int argc, char **argv) {
                                     tilesize * sizeof(float),
                                     cudaMemcpyDeviceToDevice));
             }
-            
+
             // Perform QR on this tile
             int* devInfo;
             CHECK_CUDA(cudaMalloc(&devInfo, sizeof(int)));
-            
+
             // Query workspace size
             int lwork;
             CHECK_CUSOLVER(cusolverDnSgeqrf_bufferSize(
@@ -193,11 +217,11 @@ int main(int argc, char **argv) {
                 diag_tile,
                 tilesize,
                 &lwork));
-                
+
             // Allocate workspace
             float* workspace;
             CHECK_CUDA(cudaMalloc(&workspace, lwork * sizeof(float)));
-            
+
             // Compute QR factorization
             CHECK_CUSOLVER(cusolverDnSgeqrf(
                 solver_handle,
@@ -208,7 +232,7 @@ int main(int argc, char **argv) {
                 workspace,
                 lwork,
                 devInfo));
-                
+
             // Copy the result back to the matrix
             for(int j = 0; j < tilesize; j++) {
                 CHECK_CUDA(cudaMemcpy(d_matrix_input + (diag_iter * tilesize + j) * size_in + diag_iter * tilesize,
@@ -216,7 +240,7 @@ int main(int argc, char **argv) {
                                     tilesize * sizeof(float),
                                     cudaMemcpyDeviceToDevice));
             }
-            
+
             // Cleanup
             CHECK_CUDA(cudaFree(workspace));
             CHECK_CUDA(cudaFree(devInfo));
@@ -226,8 +250,8 @@ int main(int argc, char **argv) {
         // For each diagonal block
         for (int diag_iter = 0; diag_iter < size_in/tilesize - 1; diag_iter++) {
             // Copy fresh matrix for each implementation, i.e., discard previous changes
-            CHECK_CUDA(cudaMemcpy(d_matrix, d_matrix_input, 
-                                size_in * size_in * sizeof(float), 
+            CHECK_CUDA(cudaMemcpy(d_matrix, d_matrix_input,
+                                size_in * size_in * sizeof(float),
                                 cudaMemcpyDeviceToDevice));
 
             // Compute reference results for this diagonal iter
@@ -240,7 +264,7 @@ int main(int argc, char **argv) {
             CHECK_CUDA(cudaMemcpy(host_ref.data(), d_matrix_out_ref,
                                 size_in * size_in * sizeof(float),
                                 cudaMemcpyDeviceToHost));
-            
+
             // Test each implementation
             for (size_t i = 0; i < kernels.size(); i++) {
                 // Copy input from column major (default cuBLAS format) to row major
@@ -248,20 +272,22 @@ int main(int argc, char **argv) {
 
                 auto& kernel = kernels[i];
                 auto& result = results[i];
-                
+
                 // Time the kernel
+                void* workspace = kernel.preamble(size_in, diag_iter, d_tau, d_matrix_out);
                 float local_time = benchmark_kernel([&]() {
-                    kernel.kernel(size_in, diag_iter, d_tau, d_matrix_out);
+                    kernel.kernel(size_in, diag_iter, d_tau, d_matrix_out, workspace);
                 });
+                kernel.postamble(size_in, diag_iter, d_tau, d_matrix_out, workspace);
                 if (trial >= warmup_trials)
                     result.total_time += local_time;
-                
+
                 // Copy results to host for comparison
                 std::vector<float> host_custom(size_in * size_in);
                 CHECK_CUDA(cudaMemcpy(host_custom.data(), d_matrix_out,
                                     size_in * size_in * sizeof(float),
                                     cudaMemcpyDeviceToHost));
-                
+
                 // Compare only the relevant tiles. We include the diagonal tiles since these should
                 // not be modified by the kernel
                 if (trial >= warmup_trials) {
@@ -299,25 +325,25 @@ int main(int argc, char **argv) {
         }
 
         // Print a progress message every 100 trials
-        if (trial % 100 == 0) {
+        if (trial > warmup_trials && (trial - warmup_trials) % 100 == 0) {
             std::cout << "Trial " << trial << " completed\n";
         }
     }
-    
+
     // Print results
     std::cout << "\nResults (averaged over " << num_trials << " trials) for (" << size_in << "x" << size_in << "):\n";
     std::cout << std::string(60, '-') << "\n";
-    std::cout << std::setw(30) << "Implementation" 
-              << std::setw(15) << "Time (ms)" 
+    std::cout << std::setw(30) << "Implementation"
+              << std::setw(15) << "Time (ms)"
               << std::setw(15) << "Max Error" << "\n";
     std::cout << std::string(60, '-') << "\n";
-    
+
     for (size_t i = 0; i < kernels.size(); i++) {
-        std::cout << std::setw(30) << kernels[i].name 
+        std::cout << std::setw(30) << kernels[i].name
                   << std::setw(15) << results[i].total_time / num_trials / 1000.0f
                   << std::setw(15) << results[i].max_error << "\n";
     }
-    
+
     // Cleanup
     CHECK_CUDA(cudaFree(d_matrix_input));
     CHECK_CUDA(cudaFree(d_matrix));
