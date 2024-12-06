@@ -83,14 +83,16 @@ void launch_base_applyQt_singletile_evelyne(int size_in, int diag_iter, float co
 
 template <int tile_size>
 __global__ void base_applyQt_singletile(int size_X, int row_stride_X, int row_stride_Q, float const *tau, float const* Q, float *X) {
-    auto num_threads = gridDim.x * blockDim.x;
-    auto thread_idx = blockDim.x * blockIdx.x + threadIdx.x;
-    auto columns_per_thread = ceil_div(size_X, num_threads);
+    auto total_num_threads = gridDim.x * blockDim.x;
+    auto block_num_threads = blockDim.x;
+    auto columns_per_block = ceil_div(size_X, gridDim.x);
 
-    // TODO: Use all threads in block to load the columns we will be processing using a better
-    //       access pattern
+    const auto column_prefetch_size = 128;
+    __shared__ float column_prefetch[tile_size][column_prefetch_size];
 
     // Load householder reflectors and taus
+    // NOTE: Probably PTX is only allocating half of the registers from householder_reflectors, since
+    //       we only use lower triangular part of the matrix.
     float householder_reflectors[tile_size][tile_size];
     float taus[tile_size];
     for (auto reflector_idx = 0; reflector_idx < tile_size; reflector_idx++) {
@@ -102,47 +104,61 @@ __global__ void base_applyQt_singletile(int size_X, int row_stride_X, int row_st
         }
     }
 
-    float current_column[tile_size];
-    for (auto current_column_idx = 0; current_column_idx < columns_per_thread; current_column_idx++) {
-        auto current_column_j = thread_idx * columns_per_thread + current_column_idx;
+    // Each prefetch step consists of loading a chunk of columns from DRAM into shmem, and then processing them
+    auto block_column_base_idx = blockIdx.x * columns_per_block;
+    for (auto prefetch_step = 0; prefetch_step < ceil_div(columns_per_block, column_prefetch_size); prefetch_step++) {
+        auto prefetch_column_base_idx = block_column_base_idx + prefetch_step * column_prefetch_size;
 
-        if (current_column_j >= size_X)
-            break;
+        // for (auto prefetch_element_idx = 0; prefetch_element_idx < column_prefetch_size * tile_size; prefetch_element_idx += block_num_threads) {
+        //     auto local_prefetch_column_idx = prefetch_element_idx % column_prefetch_size;
+        //     auto local_prefetch_row_idx = prefetch_element_idx / column_prefetch_size;
+        //     auto global_prefetch_column_idx = prefetch_column_base_idx + local_prefetch_column_idx;
+        //     auto global_prefetch_row_idx = local_prefetch_row_idx;
+        //     column_prefetch[local_prefetch_row_idx][local_prefetch_column_idx] = global_prefetch_column_idx < size_X ? X[global_prefetch_row_idx * row_stride_X + global_prefetch_column_idx] : 0;
+        // }
 
-        // Load current column we are processing
-        for (auto local_i = 0; local_i < tile_size; local_i++) {
-            auto current_column_i = local_i;
-            current_column[local_i] = X[current_column_i * row_stride_X + current_column_j];
-        }
+        float current_column[tile_size];
+        for (auto current_column_in_prefetch_step = 0; current_column_in_prefetch_step < ceil_div(column_prefetch_size, block_num_threads); current_column_in_prefetch_step++) {
+            auto current_column_j = prefetch_column_base_idx + current_column_in_prefetch_step * block_num_threads + threadIdx.x;
 
-        // Process current column by applying householder reflectors in reverse order
-        for (auto householder_reflector = 0; householder_reflector < tile_size; householder_reflector++) {
-            // First we compute tau * (h' x)
-            auto effective_scaling = 0.0f;
-            for (auto element_idx = 0; element_idx < tile_size; element_idx++) {
-                if (element_idx == householder_reflector) {
-                    // Implicit leading 1 in householder reflector
-                    effective_scaling += current_column[element_idx];
-                } else if (element_idx > householder_reflector) {
-                    effective_scaling += householder_reflectors[element_idx][householder_reflector] * current_column[element_idx];
+            if (current_column_j >= size_X || current_column_j >= prefetch_column_base_idx + column_prefetch_size || current_column_j >= block_column_base_idx + columns_per_block)
+                break;
+
+            // Load current column we are processing
+            for (auto local_i = 0; local_i < tile_size; local_i++) {
+                auto current_column_i = local_i;
+                current_column[local_i] = X[current_column_i * row_stride_X + current_column_j];
+            }
+
+            // Process current column by applying householder reflectors in reverse order
+            for (auto householder_reflector = 0; householder_reflector < tile_size; householder_reflector++) {
+                // First we compute tau * (h' x)
+                auto effective_scaling = 0.0f;
+                for (auto element_idx = 0; element_idx < tile_size; element_idx++) {
+                    if (element_idx == householder_reflector) {
+                        // Implicit leading 1 in householder reflector
+                        effective_scaling += current_column[element_idx];
+                    } else if (element_idx > householder_reflector) {
+                        effective_scaling += householder_reflectors[element_idx][householder_reflector] * current_column[element_idx];
+                    }
+                }
+                effective_scaling *= taus[householder_reflector];
+
+                // We now compute h (tau * (h' x)) to wrap things up
+                for (auto element_idx = 0; element_idx < tile_size; element_idx++) {
+                    if (element_idx == householder_reflector) {
+                        current_column[element_idx] -= effective_scaling;
+                    } else if (element_idx > householder_reflector) {
+                        current_column[element_idx] -= effective_scaling * householder_reflectors[element_idx][householder_reflector];
+                    }
                 }
             }
-            effective_scaling *= taus[householder_reflector];
 
-            // We now compute h (tau * (h' x)) to wrap things up
-            for (auto element_idx = 0; element_idx < tile_size; element_idx++) {
-                if (element_idx == householder_reflector) {
-                    current_column[element_idx] -= effective_scaling;
-                } else if (element_idx > householder_reflector) {
-                    current_column[element_idx] -= effective_scaling * householder_reflectors[element_idx][householder_reflector];
-                }
+            // Write out processed column
+            for (auto local_i = 0; local_i < tile_size; local_i++) {
+                auto current_column_i = local_i;
+                X[current_column_i * row_stride_X + current_column_j] = current_column[local_i];
             }
-        }
-
-        // Write out processed column
-        for (auto local_i = 0; local_i < tile_size; local_i++) {
-            auto current_column_i = local_i;
-            X[current_column_i * row_stride_X + current_column_j] = current_column[local_i];
         }
     }
 }
@@ -156,7 +172,7 @@ void launch_base_applyQt_singletile(int size_in, int diag_iter, float const *tau
     auto X = &out[diag_iter * tilesize * size_in + (diag_iter + 1) * tilesize];
     auto taus = &tau[diag_iter * size_in];
 
-    base_applyQt_singletile<tilesize><<<tilesize, tilesize>>>(size_X, row_stride_X, row_stride_Q, taus, Q, X);
+    base_applyQt_singletile<tilesize><<<tilesize, 4 * tilesize>>>(size_X, row_stride_X, row_stride_Q, taus, Q, X);
 }
 
 
