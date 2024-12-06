@@ -87,7 +87,7 @@ __global__ void base_applyQt_singletile(int size_X, int row_stride_X, int row_st
     auto block_num_threads = blockDim.x;
     auto columns_per_block = ceil_div(size_X, gridDim.x);
 
-    const auto column_prefetch_size = 128;
+    const auto column_prefetch_size = 256;
     __shared__ float column_prefetch[tile_size][column_prefetch_size];
 
     // Load householder reflectors and taus
@@ -109,17 +109,18 @@ __global__ void base_applyQt_singletile(int size_X, int row_stride_X, int row_st
     for (auto prefetch_step = 0; prefetch_step < ceil_div(columns_per_block, column_prefetch_size); prefetch_step++) {
         auto prefetch_column_base_idx = block_column_base_idx + prefetch_step * column_prefetch_size;
 
-        // for (auto prefetch_element_idx = 0; prefetch_element_idx < column_prefetch_size * tile_size; prefetch_element_idx += block_num_threads) {
-        //     auto local_prefetch_column_idx = prefetch_element_idx % column_prefetch_size;
-        //     auto local_prefetch_row_idx = prefetch_element_idx / column_prefetch_size;
-        //     auto global_prefetch_column_idx = prefetch_column_base_idx + local_prefetch_column_idx;
-        //     auto global_prefetch_row_idx = local_prefetch_row_idx;
-        //     column_prefetch[local_prefetch_row_idx][local_prefetch_column_idx] = global_prefetch_column_idx < size_X ? X[global_prefetch_row_idx * row_stride_X + global_prefetch_column_idx] : 0;
-        // }
+        for (auto prefetch_element_idx = threadIdx.x; prefetch_element_idx < column_prefetch_size * tile_size; prefetch_element_idx += block_num_threads) {
+            auto local_prefetch_j = prefetch_element_idx % column_prefetch_size;
+            auto local_prefetch_i = prefetch_element_idx / column_prefetch_size;
+            auto global_prefetch_j = prefetch_column_base_idx + local_prefetch_j;
+            auto global_prefetch_i = local_prefetch_i;
+            column_prefetch[local_prefetch_i][local_prefetch_j] = global_prefetch_j < size_X ? X[global_prefetch_i * row_stride_X + global_prefetch_j] : 0.0f;
+        }
 
         float current_column[tile_size];
         for (auto current_column_in_prefetch_step = 0; current_column_in_prefetch_step < ceil_div(column_prefetch_size, block_num_threads); current_column_in_prefetch_step++) {
-            auto current_column_j = prefetch_column_base_idx + current_column_in_prefetch_step * block_num_threads + threadIdx.x;
+            auto current_column_j_local = current_column_in_prefetch_step * block_num_threads + threadIdx.x;
+            auto current_column_j = prefetch_column_base_idx + current_column_j_local;
 
             if (current_column_j >= size_X || current_column_j >= prefetch_column_base_idx + column_prefetch_size || current_column_j >= block_column_base_idx + columns_per_block)
                 break;
@@ -127,7 +128,7 @@ __global__ void base_applyQt_singletile(int size_X, int row_stride_X, int row_st
             // Load current column we are processing
             for (auto local_i = 0; local_i < tile_size; local_i++) {
                 auto current_column_i = local_i;
-                current_column[local_i] = X[current_column_i * row_stride_X + current_column_j];
+                current_column[local_i] = column_prefetch[current_column_i][current_column_j_local];
             }
 
             // Process current column by applying householder reflectors in reverse order
