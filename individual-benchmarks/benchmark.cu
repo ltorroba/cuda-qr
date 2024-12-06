@@ -52,6 +52,7 @@ struct QtKernel {
 int main(int argc, char **argv) {
     bool verbose = false;
     bool memory_usage = false;
+    bool single_row = false;
     int warmup_trials = 100;
     int num_trials = 100;
     int size_in = 1024;
@@ -66,6 +67,8 @@ int main(int argc, char **argv) {
             num_trials = std::atoi(argv[++i]);
         } else if (std::string(argv[i]) == "--warmup") {
             warmup_trials = std::atoi(argv[++i]);
+        } else if (std::string(argv[i]) == "--single-row") {
+            single_row = true;
         }
     }
 
@@ -115,6 +118,8 @@ int main(int argc, char **argv) {
     };
     std::vector<KernelResults> results(kernels.size());
 
+    int diag_iters = single_row ? 1 : size_in/tilesize - 1;
+
     // Benchmark loop:
     // - Initialize matrix with random data
     // - Run QR individually for each diagonal block to populate the diagonal tiles and the tau vector
@@ -142,7 +147,7 @@ int main(int argc, char **argv) {
         CHECK_CURAND(curandDestroyGenerator(gen));
 
         // Run QR individually for each diagonal block to populate the diagonal tiles and the tau vector
-        for (int diag_iter = 0; diag_iter < size_in/tilesize - 1; diag_iter++) {
+        for (int diag_iter = 0; diag_iter < diag_iters; diag_iter++) {
             // Extract the diagonal tile
             float* diag_tile;
             CHECK_CUDA(cudaMalloc(&diag_tile, tilesize * tilesize * sizeof(float)));
@@ -198,7 +203,7 @@ int main(int argc, char **argv) {
         }
 
         // For each diagonal block
-        for (int diag_iter = 0; diag_iter < size_in/tilesize - 1; diag_iter++) {
+        for (int diag_iter = 0; diag_iter < diag_iters; diag_iter++) {
             // Copy fresh matrix for each implementation, i.e., discard previous changes
             CHECK_CUDA(cudaMemcpy(d_matrix, d_matrix_input,
                                 size_in * size_in * sizeof(float),
