@@ -6,4 +6,4 @@
 *.fatbin
 *.bin
 
-benchmark
+build
