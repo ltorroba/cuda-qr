@@ -11,6 +11,8 @@
 #include <vector>
 #include <cublas_v2.h>
 #include <cusolverDn.h>
+#include <sstream>
+
 
 void cuda_check(cudaError_t code, const char *file, int line) {
     if (code != cudaSuccess) {
@@ -98,6 +100,8 @@ namespace qr_base {
 
 
 //-------------------- multiply by Q kernels-----------------------------------
+
+
 
 __global__ void base_applyQt_singletile( //aplies Qt (given by householder reflectors on diagonal tile k) to the remainder of the row
     int size_in,
@@ -214,6 +218,7 @@ __global__ void base_applyQt_doubletile( //aplies Qt (given by householder refle
 
 }
 //-------------------- calculate QR kernels-----------------------------------
+
 
 
 __global__ void base_calcQR_singletile( //calculates in-place QR of diagonal tile
@@ -361,7 +366,7 @@ __global__ void base_calcQR_doubletile( //calculates in-place QR of diagonal til
 
 
         
-
+/*
 void launch_tiled_qr(
     int32_t size_i,
     float *a, float *tau) {
@@ -380,7 +385,62 @@ void launch_tiled_qr(
     }
     base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,nb_blocks-1,tau,a); 
         
-    }
+    }*/
+
+
+    void launch_tiled_qr(
+        int32_t size_i,
+        float *a, float *tau) {
+            
+        if ( size_i%tilesize !=0 ){
+                throw std::invalid_argument( "Not implemented for this argument size" );
+        }
+        cudaStream_t stream1, stream2;
+        cudaStreamCreate ( &stream1);
+        cudaStreamCreate ( &stream2);
+        int nb_blocks= size_i/tilesize;
+        base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,tau,a); 
+        for(int iter=0;iter<nb_blocks-1;iter++){
+            base_calcQR_doubletile<<<1,dim3(tilesize,tilesize),0,stream1>>>(size_i,iter,1,tau,a);
+            base_applyQt_singletile<<<nb_blocks-1-iter,dim3(tilesize,numthreads),0,stream2>>>(size_i,size_i,iter,true,tau,a,a); 
+            cudaDeviceSynchronize ();
+            for (int row=1;row+iter<nb_blocks;row++){
+                if (row+iter<nb_blocks-1){
+                    base_calcQR_doubletile<<<1,dim3(tilesize,tilesize),0,stream1>>>(size_i,iter,row+1,tau,a);
+                }else if (iter<nb_blocks-2){
+                    base_calcQR_singletile<<<1,dim3(tilesize,tilesize),0,stream1>>>(size_i,iter+1,tau,a); 
+                }
+                base_applyQt_doubletile<<<nb_blocks-1-iter,dim3(tilesize,numthreads),0,stream2>>>(size_i,size_i,iter,row,true,tau,a,a); 
+                cudaDeviceSynchronize ();
+            }
+        }
+        cudaStreamDestroy( stream1);
+        cudaStreamDestroy(stream2);
+        if (nb_blocks>1){
+            base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,nb_blocks-1,tau,a);
+        }
+        }
+
+
+/*
+
+base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,tau,a); 
+        for(int iter=0;iter<nb_blocks-1;iter++){
+            base_calcQR_doubletile<<<1,dim3(tilesize,tilesize)>>>(size_i,iter,1,tau,a);
+            base_applyQt_singletile<<<nb_blocks-1-iter,dim3(tilesize,numthreads)>>>(size_i,size_i,iter,true,tau,a,a); 
+            for (int row=1;row+iter<nb_blocks;row++){
+                if (row+iter<nb_blocks-1){
+                    base_calcQR_doubletile<<<1,dim3(tilesize,tilesize)>>>(size_i,iter,row+1,tau,a);
+                }else{
+                    base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,iter+1,tau,a); 
+                }
+                base_applyQt_doubletile<<<nb_blocks-1-iter,dim3(tilesize,numthreads)>>>(size_i,size_i,iter,row,true,tau,a,a); 
+                
+            }
+        }
+        cudaDeviceSynchronize ();
+        base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,nb_blocks-1,tau,a);
+        */
 
     void launch_mult_qt(
         int32_t size_k, int32_t size_i,  int32_t size_j,  
@@ -389,12 +449,13 @@ void launch_tiled_qr(
         if ( size_k%tilesize !=0 ){
                 throw std::invalid_argument( "Not implemented for this argument size" );
         }
+        int no_blocks=size_k/tilesize;
         
         for(int iter=0;iter<min(size_i,size_j)/tilesize;iter++){
-            base_applyQt_singletile<<<1,dim3(tilesize,numthreads)>>>(size_j,size_k,iter,false,tau,a, b); 
+            base_applyQt_singletile<<<no_blocks,dim3(tilesize,numthreads)>>>(size_j,size_k,iter,false,tau,a, b); 
             for (int row=1;row+iter<(size_i/tilesize);row++){
 
-                base_applyQt_doubletile<<<1,dim3(tilesize,numthreads)>>>(size_j,size_k,iter,row,false,tau,a, b); 
+                base_applyQt_doubletile<<<no_blocks,dim3(tilesize,numthreads)>>>(size_j,size_k,iter,row,false,tau,a, b); 
             }
         }
             
@@ -417,25 +478,26 @@ void launch_tiled_qr(
 
     
         }
-        void test_qrkernel_double(
-            int32_t size_i,
-            float *a, float *tau) {
-            base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,tau,a); 
-            base_calcQR_doubletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,1,tau,a); 
-        
-        
-            }
+    void test_qrkernel_double(
+        int32_t size_i,
+        float *a, float *tau) {
+        base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,tau,a); 
+        base_calcQR_doubletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,1,tau,a); 
     
-        void test_mulqtkernel_double(
-            int32_t size_i,
-            float *a, float *tau) {
-                base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,tau,a); 
-                base_applyQt_singletile<<<1,dim3(tilesize,numthreads)>>>(size_i,size_i,0,true,tau,a,a); 
-                base_calcQR_doubletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,1,tau,a);
-                base_applyQt_doubletile<<<1,dim3(tilesize,numthreads)>>>(size_i,size_i,0,1,true,tau,a,a); 
-                base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,1,tau,a); 
-        
-            }
+    
+        }
+
+    void test_mulqtkernel_double(
+        int32_t size_i,
+        float *a, float *tau) {
+            base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,tau,a); 
+            base_applyQt_singletile<<<1,dim3(tilesize,numthreads)>>>(size_i,size_i,0,true,tau,a,a); 
+            base_calcQR_doubletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,1,tau,a);
+            base_applyQt_doubletile<<<1,dim3(tilesize,numthreads)>>>(size_i,size_i,0,1,true,tau,a,a); 
+            base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,1,tau,a); 
+    
+        }         
+                
         
 
 
@@ -448,6 +510,25 @@ enum class Phase {
     TEST,
     WARMUP,
     BENCHMARK,
+};
+
+struct BenchmarkResults {
+    char const *name;
+    std::map<std::tuple<int32_t, int32_t>, double> elapsed_ms;
+    std::map<std::tuple<int32_t,int32_t>, double> elapsed_ms_mulx;
+};
+
+
+struct BenchmarkConfig {
+    int32_t size_i;
+    int32_t size_j;
+};
+
+struct TestData {
+    std::map<std::tuple<int32_t, int32_t>, std::vector<float>> a;
+    std::map<std::tuple<int32_t, int32_t>, std::vector<float>> ref;
+    std::map<std::tuple<int32_t, int32_t>, std::vector<float>> x;
+    std::map<std::tuple<int32_t, int32_t>, std::vector<float>> xref;
 };
 
 std::vector<float> read_data(std::string const &path, int32_t size) {
@@ -463,7 +544,9 @@ std::vector<float> read_data(std::string const &path, int32_t size) {
 
 template <typename Reset, typename F>
 double
-benchmark_ms(double target_time_ms, int32_t num_iters_inner, Reset &&reset, F &&f) {
+benchmark_ms( Reset &&reset, F &&f) {
+    double target_time_ms = 200.0;
+    int32_t num_iters_inner =4;
     double best_time_ms = std::numeric_limits<double>::infinity();
     double elapsed_ms = 0.0;
     while (elapsed_ms < target_time_ms) {
@@ -482,17 +565,31 @@ benchmark_ms(double target_time_ms, int32_t num_iters_inner, Reset &&reset, F &&
     return best_time_ms;
 }
 
-struct BenchmarkConfig {
-    int32_t size_i;
-    int32_t size_j;
-};
+float get_relrmse(int size_i, int size_j, float *valsgpu, std::vector<float> ref, bool triu, Phase phase ){
+    std::vector<float> out_host(size_i * size_j * sizeof(float));
+    CUDA_CHECK(cudaMemcpy(  out_host.data(), valsgpu ,size_i * size_j* sizeof(float), cudaMemcpyDeviceToHost));
 
-struct TestData {
-    std::map<std::tuple<int32_t, int32_t>, std::vector<float>> a;
-    std::map<std::tuple<int32_t, int32_t>, std::vector<float>> ref;
-    std::map<std::tuple<int32_t, int32_t>, std::vector<float>> x;
-    std::map<std::tuple<int32_t, int32_t>, std::vector<float>> xref;
-};
+    double mse = 0.0;
+    double divmse=0.0;
+    for (int32_t i = 0; i < min(size_i,size_j); ++i) {
+        for (int32_t j = (triu? i : 0); j < size_j; ++j) {
+            float diff = abs(abs(out_host[i * size_j + j]) - abs(ref[i * size_j + j]));
+            mse+= diff*diff;
+            divmse+= abs(ref[i * size_j + j])*abs(ref[i * size_j + j]);
+        }
+    }
+
+    float rel_rmse = std::sqrt(mse) / std::sqrt(divmse) ;
+
+    if (((rel_rmse > 1e-3)  || rel_rmse!=rel_rmse) && size_i<65 && size_j<65 && phase == Phase::TEST) {
+        printf("\n  expected output:\n");
+        print_matrix(size_i, size_j, ref);
+        printf("\n  obtained output:\n");
+        print_matrix(size_i,  size_j, out_host);
+    } 
+    return rel_rmse;
+}
+
 
 TestData read_test_data(Phase phase,
     std::string const &test_data_dir,
@@ -512,7 +609,7 @@ TestData read_test_data(Phase phase,
 
         if (data.ref.find({size_i, size_j}) == data.ref.end()) {
             data.ref[{size_i, size_j}] = read_data(
-                path_prefix + "ref_" + std::to_string(size_i) + "_" +
+                path_prefix + "a_" + std::to_string(size_i) + "_" +
                     std::to_string(size_j) + ".bin",
                 size_i * size_j);
         }
@@ -520,15 +617,15 @@ TestData read_test_data(Phase phase,
             data.x[{size_i, size_j}] = read_data(
                 path_prefix + "x_" + std::to_string(size_i) +"_" +
                 std::to_string(size_j) + ".bin",
-                size_i * tilesize);
+                size_i * size_j);
         }
         
 
         if (data.xref.find({size_i, size_j}) == data.xref.end()) {
             data.xref[{size_i, size_j}] = read_data(
-                path_prefix + "xmul_" + std::to_string(size_i) +"_" +
+                path_prefix + "x_" + std::to_string(size_i) +"_" +
                 std::to_string(size_j) + ".bin",
-                size_i * tilesize);
+                size_i * size_j);
         }
         
             
@@ -536,12 +633,6 @@ TestData read_test_data(Phase phase,
     }
     return data;
 }
-
-struct BenchmarkResults {
-    char const *name;
-    std::map<std::tuple<int32_t, int32_t>, double> elapsed_ms;
-    std::map<std::tuple<int32_t>, double> elapsed_ms_mulx;
-};
 
 
 template <typename Impl>
@@ -561,17 +652,8 @@ void run_config(
     CUDA_CHECK(cudaMalloc(&a_gpu, size_i * size_j * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&tau_gpu, size_i * size_j * sizeof(float))); // TODO: determine size more accurately
 
-    CUDA_CHECK(cudaMemcpy(
-        a_gpu,
-        a.data(),
-        size_i * size_j * sizeof(float),
-        cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(   a_gpu,a.data(),size_i * size_j * sizeof(float),cudaMemcpyHostToDevice));
 
-    if (phase == Phase::BENCHMARK) {
-        printf("  QR    %6d  %6d  ", size_i, size_j);
-    } else {
-        printf("  warmup      QR   %6d  %6d", size_i, size_j);
-    }
 
     if (phase == Phase::TEST){
         if(size_i==tilesize && size_j==tilesize){
@@ -583,151 +665,60 @@ void run_config(
         }else if (size_i==2*tilesize && size_j==2*tilesize){
             Impl::testmulq2(size_j, a_gpu, tau_gpu);
         } else{
-            Impl::run(size_j,   a_gpu, tau_gpu);
+            Impl::run(size_j,   a_gpu, tau_gpu); 
         }
-
-    }else{
+    }
+    else{
         Impl::run(size_j,   a_gpu, tau_gpu);
     }
 
-    std::vector<float> c_out_host(size_i * size_j);
-    CUDA_CHECK(cudaMemcpy(
-        c_out_host.data(),
-        a_gpu,
-        size_i * size_j * sizeof(float),
-        cudaMemcpyDeviceToHost));
-
-    double mse = 0.0;
-    for (int32_t i = 0; i < size_i; ++i) {
-        for (int32_t j = i; j < size_j; ++j) {
-            float diff = abs(abs(c_out_host[i * size_j + j]) - abs(ref[i * size_j + j]))/abs(ref[i * size_j + j]);
-            mse+= diff*diff;
-        }
-    }
+    float rel_rmse = get_relrmse(size_i, size_j, a_gpu, ref, true, phase );
     
-    float rel_rmse = std::sqrt(mse) / max(size_i,size_j);
-
-    if (phase == Phase::BENCHMARK || phase == Phase::TEST ) {
-        printf("     %8.02e", rel_rmse);
-    }
-
-    if ((rel_rmse > 1e-3 ) || rel_rmse!=rel_rmse ) {
-        if (phase == Phase::BENCHMARK) {
-            printf("  %9s  %7s", "-", "-");
-        } else if (phase == Phase::TEST){
-            printf("\n");
-            printf("  expected output:\n");
-            print_matrix(size_i, size_j, ref);
-            printf("\n");
-            printf("  obtained output:\n");
-            print_matrix(size_i,  size_j, c_out_host);
-        }
-    } else if (phase == Phase::BENCHMARK){
-        double target_time_ms = 200.0;
+    
+    if (phase == Phase::BENCHMARK){
         double elapsed_ms = benchmark_ms(
-            target_time_ms,
-            4,
             [&]() {
                 CUDA_CHECK(cudaMemcpy( a_gpu, a.data(), size_i * size_j * sizeof(float),cudaMemcpyHostToDevice));
             },
             [&]() {
                 Impl::run(size_j,  a_gpu, tau_gpu);
             });
-
+            printf(" %6d  %6d   QR     ", size_i, size_j);
+            printf(" %8.02e ", rel_rmse);
             printf(" %9.02f ", elapsed_ms);
             results.elapsed_ms[{size_i, size_j}] = elapsed_ms;
+            CUDA_CHECK(cudaMemcpy( a_gpu, a.data(), size_i * size_j * sizeof(float),cudaMemcpyHostToDevice));
+            Impl::run(size_j,   a_gpu, tau_gpu);
+    } 
 
-    }
-
-    printf("\n");
     
     auto const &x = data.x.at({size_i, size_j});
     auto const &xref = data.xref.at({size_i, size_j});
 
     float *x_gpu;
-    CUDA_CHECK(cudaMalloc(&x_gpu, size_i * tilesize * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&x_gpu, size_i * size_j * sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(   x_gpu, x.data(),size_i * size_j * sizeof(float),cudaMemcpyHostToDevice));
 
-    CUDA_CHECK(cudaMemcpy(
-        x_gpu,
-        x.data(),
-        size_i * tilesize * sizeof(float),
-        cudaMemcpyHostToDevice));
-
-    if (phase == Phase::BENCHMARK) {
-        printf("  Qmul  %6d  %6d  ", size_i, size_j);
-    } else {
-        printf("  warmup  mul Qt   %6d ", size_i);
-    }
-
-    Impl::run_mulqt(tilesize, size_i,size_j, a_gpu, tau_gpu, x_gpu);
-
-
-    std::vector<float> x_out_host(size_i * tilesize * sizeof(float));
-    CUDA_CHECK(cudaMemcpy(
-        x_out_host.data(),
-        x_gpu,
-        size_i * tilesize* sizeof(float),
-        cudaMemcpyDeviceToHost));
-        
-    mse = 0.0;
-    for (int32_t i = 0; i < min(size_i,size_j); ++i) {
-        for (int32_t j = 0; j < tilesize; ++j) {
-            float diff = abs(abs(x_out_host[i * tilesize + j]) - abs(xref[i * tilesize + j]))/abs(xref[i * tilesize + j]);
-            mse+= diff*diff;
-        }
-    }
-    
-    rel_rmse = std::sqrt(mse) / min(size_i,tilesize);
+    Impl::run_mulqt(size_j, size_i,size_j, a_gpu, tau_gpu, x_gpu);
+    rel_rmse = get_relrmse(size_i, size_j, x_gpu, xref, false, phase );
 
     
-    if (phase == Phase::BENCHMARK  || phase == Phase::TEST  ) {
-         printf("        %8.02e", rel_rmse);
-        
-        
-    }
-
-    if ((rel_rmse > 1e-3)  || rel_rmse!=rel_rmse) {
-        if (phase == Phase::BENCHMARK) {
-            printf("  %9s  %7s", "-", "-");
-        } else if (phase == Phase::TEST){
-            printf("\n");
-            printf("  input :\n");
-            print_matrix(size_i, tilesize, x);
-            printf("\n");
-            printf("  input a:\n");
-            print_matrix(size_i, size_j, c_out_host);
-            printf("\n");
-            printf("  expected output:\n");
-            print_matrix(size_i, tilesize, xref);
-            printf("\n");
-            printf("  obtained output:\n");
-            print_matrix(size_i,  tilesize, x_out_host);
-        }
-    } else if (phase == Phase::BENCHMARK){
-        double target_time_ms = 200.0;
+    if (phase == Phase::BENCHMARK){
         double elapsed_ms = benchmark_ms(
-            target_time_ms,
-            4,
             [&]() {
-                CUDA_CHECK(cudaMemcpy( x_gpu, x.data(), size_i * tilesize * sizeof(float),cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpy( x_gpu, x.data(), size_i * size_j * sizeof(float),cudaMemcpyHostToDevice));
             },
             [&]() {
-                Impl::run_mulqt(tilesize, size_i,size_j, a_gpu, tau_gpu, x_gpu);
+                Impl::run_mulqt(size_j, size_i,size_j, a_gpu, tau_gpu, x_gpu);
             });
-
-            printf(" %9.02f ", elapsed_ms);
-            results.elapsed_ms_mulx[{size_i}] = elapsed_ms;
-        
+            printf("  Qmul      %8.02e", rel_rmse);
+            printf(" %9.02f \n", elapsed_ms);
+            results.elapsed_ms_mulx[{size_i,size_j}] = elapsed_ms;    
     }
-
-    printf("\n");
-    
-    
-   
-
 
     CUDA_CHECK(cudaFree(a_gpu));
     CUDA_CHECK(cudaFree(tau_gpu));
+    CUDA_CHECK(cudaFree(x_gpu));
 }
 
 template <typename Impl>
@@ -737,22 +728,27 @@ BenchmarkResults run_all_configs(
     std::vector<BenchmarkConfig> const &configs) {
     auto results = BenchmarkResults{Impl::name};
     if (phase == Phase::WARMUP) {
-        printf("warmup %s:\n\n", Impl::name);
     } else if (phase == Phase::TEST){
-        printf("testing %s:\n\n", Impl::name);
+        printf(" testing %s", Impl::name);
     }else {
         printf("%s:\n\n", Impl::name);
         printf(
-            " %-6s  %-6s  %-6s   %-8s  %-9s  \n",
-            " type ",
+            " %-6s  %-6s  %-6s     %-8s%-9s%-6s     %-8s  %-9s  \n",
             "size_i",
             "size_j",
-            "RRMSE",
+            " type ",
+            "RRMSE ",
+            "time (ms)",
+            " type ",
+            "RRMSE ",
             "time (ms)");
         printf(
-            " %-6s  %-6s  %-6s  %-8s  %-9s\n",
+            " %-6s  %-6s  %-6s    %-8s %-9s  %-6s    %-8s %-9s\n",
             "------",
             "------",
+            "------",
+            "--------",
+            "---------",
             "------",
             "--------",
             "---------");
@@ -810,11 +806,19 @@ struct QRbase {
     }
 
 
-
 };
 
 
 std::vector<BenchmarkResults> run_all_impls(
+    Phase phase,
+    TestData const &data,
+    std::vector<BenchmarkConfig> const &configs) {
+    auto results = std::vector<BenchmarkResults>{};
+    results.push_back(run_all_configs<QRbase>(phase, data, configs));
+    return results;
+}
+
+std::vector<BenchmarkResults> run_all_impls_kernels(
     Phase phase,
     TestData const &data,
     std::vector<BenchmarkConfig> const &configs) {
@@ -858,23 +862,128 @@ void write_json_results(
 }
 
 BenchmarkResults get_cublas_results(Phase phase,
-    TestData const &data,
+    TestData  &data,
     std::vector<BenchmarkConfig> const &configs) {
     auto results = BenchmarkResults{"cusolver"};
-    if (phase == Phase::WARMUP) {
-        printf("warmup cusolver:\n\n");
-    }else {
-        printf(" benchmarking cusolver:\n\n");
-        printf(
-            "  %-6s  %-6s   %-9s  \n",
-            "size_i",
-            "size_j",
-            "time (ms)");
-        printf(
-            " %-6s  %-6s   %-9s  \n",
-            "------",
-            "------",
-            "---------");
+    if (phase!= Phase::WARMUP) {
+        printf(" benchmarking cusolver\n");
+    }
+    for (auto const &config : configs) {
+        auto size_i = config.size_i;
+        auto size_j = config.size_j;
+    
+        auto const &a = data.a.at({size_i, size_j});
+        auto  &ref = data.ref.at({size_i, size_j});
+        float *a_gpu;
+        float *a_gpu_temp;
+        float *tau_gpu;
+        CUDA_CHECK(cudaMalloc(&a_gpu, size_i * size_j * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&a_gpu_temp, size_i * size_j * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&tau_gpu, size_i * size_j * sizeof(float)));
+
+        cublasHandle_t handle;
+        CHECK_CUBLAS(cublasCreate(&handle));
+        // Setup cuSolver for QR
+        cusolverDnHandle_t solver_handle;
+        CHECK_CUSOLVER(cusolverDnCreate(&solver_handle));
+        int* devInfo;
+        CHECK_CUDA(cudaMalloc(&devInfo, sizeof(int)));
+
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
+
+        // Query working space for QR
+        int lwork;
+        CHECK_CUSOLVER(cusolverDnSgeqrf_bufferSize(solver_handle, size_i, size_j, a_gpu, size_i, &lwork));
+        float* workspace;
+        CHECK_CUDA(cudaMalloc(&workspace, lwork * sizeof(float)));
+        
+        
+        if (phase == Phase::BENCHMARK) {
+            double elapsed_ms = benchmark_ms(
+            [&]() {
+                CUDA_CHECK(cudaMemcpy( a_gpu_temp, a.data(), size_i * size_j * sizeof(float),cudaMemcpyHostToDevice));
+                
+            },
+            [&]() {
+                CHECK_CUSOLVER(cusolverDnSgeqrf(solver_handle, size_i, size_j, 
+                    a_gpu_temp, size_i, tau_gpu, workspace, lwork, devInfo));
+            });
+            results.elapsed_ms[{size_i, size_j}] = elapsed_ms;
+        }
+
+        CUDA_CHECK(cudaMemcpy( a_gpu_temp, a.data(), size_i * size_j * sizeof(float),cudaMemcpyHostToDevice));
+        CHECK_CUBLAS(cublasSgeam(handle, CUBLAS_OP_T,  CUBLAS_OP_N, 
+            size_i, size_j,  &alpha, a_gpu_temp,size_j, &beta, nullptr, size_i, a_gpu,  size_i));
+        CHECK_CUSOLVER(cusolverDnSgeqrf(solver_handle, size_i, size_j, 
+            a_gpu, size_i, tau_gpu, workspace, lwork, devInfo));
+        CHECK_CUBLAS(cublasSgeam(handle, CUBLAS_OP_T,  CUBLAS_OP_N, 
+            size_j, size_i,  &alpha, a_gpu,size_i, &beta, nullptr, size_j, a_gpu_temp,  size_j));
+        CUDA_CHECK(cudaMemcpy( ref.data(),a_gpu_temp,  size_i * size_j * sizeof(float),cudaMemcpyDeviceToHost));
+
+                
+        auto const &x = data.x.at({size_i, size_j});
+        auto &xref =data.xref.at({size_i, size_j});
+        float *x_gpu;
+        float *x_gpu_temp;
+        CUDA_CHECK(cudaMalloc(&x_gpu_temp, size_i * size_j * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&x_gpu, size_i * size_j * sizeof(float)));
+
+        CHECK_CUSOLVER(cusolverDnSormqr_bufferSize( solver_handle, 
+            CUBLAS_SIDE_LEFT, CUBLAS_OP_T, size_i,size_j, std::min(size_i,size_j),         
+            a_gpu, size_i,  tau_gpu, x_gpu,  size_i,  &lwork));
+        float* workspace2;
+        CHECK_CUDA(cudaMalloc(&workspace2, lwork * sizeof(float)));
+
+        if (phase == Phase::BENCHMARK) {
+            double elapsed_ms = benchmark_ms(
+            [&]() {
+                CUDA_CHECK(cudaMemcpy( x_gpu_temp, x.data(), size_i * size_j * sizeof(float),cudaMemcpyHostToDevice));
+                
+            },
+            [&]() {
+                CHECK_CUSOLVER(cusolverDnSormqr(solver_handle, 
+                    CUBLAS_SIDE_LEFT, CUBLAS_OP_T, size_i,size_j, std::min(size_i,size_j),         
+                    a_gpu, size_i,  tau_gpu, x_gpu_temp,  size_i,
+                    workspace2, lwork, devInfo));
+            });
+            results.elapsed_ms_mulx[{size_i, size_j}] = elapsed_ms;
+        }
+
+        CUDA_CHECK(cudaMemcpy( x_gpu_temp, x.data(), size_i * size_j * sizeof(float),cudaMemcpyHostToDevice));
+        CHECK_CUBLAS(cublasSgeam(handle, CUBLAS_OP_T,  CUBLAS_OP_N, 
+            size_i, size_j,  &alpha, x_gpu_temp, size_j, &beta, nullptr, size_i, x_gpu,  size_i));
+        
+        // Apply Qt to the tile
+        CHECK_CUSOLVER(cusolverDnSormqr(solver_handle, 
+            CUBLAS_SIDE_LEFT, CUBLAS_OP_T, size_i,size_j, std::min(size_i,size_j),         
+            a_gpu, size_i,  tau_gpu, x_gpu,  size_i,
+            workspace2, lwork, devInfo));
+        CHECK_CUBLAS(cublasSgeam(handle, CUBLAS_OP_T,  CUBLAS_OP_N, 
+            size_j, size_i,  &alpha, x_gpu,size_i, &beta, nullptr,size_j,  x_gpu_temp,  size_j));
+        CUDA_CHECK(cudaMemcpy( xref.data(), x_gpu_temp,size_i * size_j* sizeof(float),cudaMemcpyDeviceToHost));
+
+        CUDA_CHECK(cudaFree(a_gpu));
+        CUDA_CHECK(cudaFree(a_gpu_temp));
+        CUDA_CHECK(cudaFree(tau_gpu));
+        CUDA_CHECK(cudaFree(workspace));
+        CUDA_CHECK(cudaFree(workspace2));
+        CUDA_CHECK(cudaFree(x_gpu));
+        CUDA_CHECK(cudaFree(x_gpu_temp));
+        CHECK_CUDA(cudaFree(devInfo));
+        CHECK_CUSOLVER(cusolverDnDestroy(solver_handle));
+    }
+    return results;
+
+
+}
+
+BenchmarkResults get_cublas_results_extended(Phase phase,
+    TestData  &data,
+    std::vector<BenchmarkConfig> const &configs) {
+    auto results = BenchmarkResults{"cusolver_ext"};
+    if (phase!= Phase::WARMUP) {
+        printf(" benchmarking cusolver extended\n");
     }
     for (auto const &config : configs) {
         auto size_i = config.size_i;
@@ -884,90 +993,96 @@ BenchmarkResults get_cublas_results(Phase phase,
         float *a_gpu;
         float *tau_gpu;
         CUDA_CHECK(cudaMalloc(&a_gpu, size_i * size_j * sizeof(float)));
-        CUDA_CHECK(cudaMalloc(&tau_gpu, size_i * size_j * sizeof(float))); // TODO: determine size more accurately
-    
-        CUDA_CHECK(cudaMemcpy( a_gpu, a.data(), size_i * size_j * sizeof(float),cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMalloc(&tau_gpu, size_i * size_j * sizeof(float)));
 
-        // Setup cuSolver for QR
         cusolverDnHandle_t solver_handle;
         CHECK_CUSOLVER(cusolverDnCreate(&solver_handle));
-        
-        // Query working space for QR
-        int lwork;
-        CHECK_CUSOLVER(cusolverDnSgeqrf_bufferSize(solver_handle, size_j, size_j, a_gpu, size_j, &lwork));
-        
-        // Allocate working space
-        float* workspace;
-        CHECK_CUDA(cudaMalloc(&workspace, lwork * sizeof(float)));
         int* devInfo;
         CHECK_CUDA(cudaMalloc(&devInfo, sizeof(int)));
-      
-    
-        if (phase == Phase::BENCHMARK) {
-            printf("  %6d  %6d  ", size_i, size_j);
-        } else {
-            printf("  warmup %6d  %6d", size_i, size_j);
-        }
-    
+
         
-        // Compute QR factorization in-place in AB
-        CHECK_CUSOLVER(cusolverDnSgeqrf(solver_handle, size_i, size_j, 
-            a_gpu, size_j, tau_gpu, workspace, lwork, devInfo));
-    
-        double target_time_ms = 200.0;
-        double elapsed_ms = benchmark_ms(
-            target_time_ms,
-            4,
+        
+            double elapsed_ms = benchmark_ms(
             [&]() {
                 CUDA_CHECK(cudaMemcpy( a_gpu, a.data(), size_i * size_j * sizeof(float),cudaMemcpyHostToDevice));
-                if (lwork > 0) {
-                    CUDA_CHECK(cudaMemset(workspace, 0, lwork));
-                }
             },
             [&]() {
+                int lwork;
+                CHECK_CUSOLVER(cusolverDnSgeqrf_bufferSize(solver_handle, size_i, size_j, a_gpu, size_i, &lwork));
+                float* workspace;
+                CHECK_CUDA(cudaMalloc(&workspace, lwork * sizeof(float)));
                 CHECK_CUSOLVER(cusolverDnSgeqrf(solver_handle, size_i, size_j, 
-                    a_gpu, size_j, tau_gpu, workspace, lwork, devInfo));
+                    a_gpu, size_i, tau_gpu, workspace, lwork, devInfo));
+                    CUDA_CHECK(cudaFree(workspace));
             });
-
-        if (phase == Phase::BENCHMARK) {
-
             results.elapsed_ms[{size_i, size_j}] = elapsed_ms;
-            printf("  %9.02f ", elapsed_ms);
-        }
+            
         
-    
-        printf("\n");
-    
+                
+        auto const &x = data.x.at({size_i, size_j});
+        float *x_gpu;
+        CUDA_CHECK(cudaMalloc(&x_gpu, size_i * size_j * sizeof(float)));
+
+ 
+            elapsed_ms = benchmark_ms(
+            [&]() {
+                CUDA_CHECK(cudaMemcpy( x_gpu, x.data(), size_i * size_j * sizeof(float),cudaMemcpyHostToDevice));
+            },
+            [&]() {
+                int lwork;
+                CHECK_CUSOLVER(cusolverDnSormqr_bufferSize( solver_handle, 
+                    CUBLAS_SIDE_LEFT, CUBLAS_OP_T, size_i,size_j, std::min(size_i,size_j),         
+                    a_gpu, size_i,  tau_gpu, x_gpu,  size_i,  &lwork));
+                float* workspace2;
+                CHECK_CUDA(cudaMalloc(&workspace2, lwork * sizeof(float)));
+                CHECK_CUSOLVER(cusolverDnSormqr(solver_handle, 
+                    CUBLAS_SIDE_LEFT, CUBLAS_OP_T, size_i,size_j, std::min(size_i,size_j),         
+                    a_gpu, size_i,  tau_gpu, x_gpu,  size_i,
+                    workspace2, lwork, devInfo));
+                CUDA_CHECK(cudaFree(workspace2));
+            });
+            results.elapsed_ms_mulx[{size_i, size_j}] = elapsed_ms;
+        
+
         CUDA_CHECK(cudaFree(a_gpu));
         CUDA_CHECK(cudaFree(tau_gpu));
-        CUDA_CHECK(cudaFree(workspace));
+        CUDA_CHECK(cudaFree(x_gpu));
         CHECK_CUDA(cudaFree(devInfo));
         CHECK_CUSOLVER(cusolverDnDestroy(solver_handle));
     }
-    printf("\n");
     return results;
 
 
 }
 
+
+
+
 void print_speedup(
     std::vector<BenchmarkConfig> const &configs,
     BenchmarkResults const &first,
-    BenchmarkResults const &curesults) {
+    BenchmarkResults const &curesults, BenchmarkResults const &curesults2) {
     printf("\n Percentage of cublas %s :\n\n", first.name);
-    printf("  %-6s  %-6s  %-7s\n", "size_i", "size_j",  "vs cusolver");
-    printf("  %-6s  %-6s  %-7s\n", "------", "------",   "-----------");
+    printf("  %-6s  %-6s %-6s %-9s %-7s %-9s %-14s %-6s  %-9s %-7s %-9s %-14s\n", "size_i", "size_j", " type ", "time(ms) ", "vs cusolver","cutime(ms)", "cutime_ext(ms)",
+     " type ", "time(ms) ","vs cusolver" ,"cutime(ms)", "cutime_ext(ms)");
+    printf("  %-6s  %-6s %-6s  %-9s %-7s %-9s %-14s %-6s  %-9s %-7s %-9s %-14s\n", "------", "------", "------", "---------","-----------", "---------","--------------",
+       "------",  "---------","-----------","---------" ,"--------------");
     for (auto const &config : configs) {
         auto size_i = config.size_i;
         auto size_j = config.size_j;
         printf("  %6d  %6d ", size_i, size_j);
         auto it_first = first.elapsed_ms.find({size_i, size_j});
         auto it_cublas = curesults.elapsed_ms.find({size_i, size_j});
-        if (it_first != first.elapsed_ms.end() && it_cublas != curesults.elapsed_ms.end()) {
-            printf("  %6.02f %%", it_cublas->second/it_first->second *100 );
-        } else {
-            printf("  %7s", "-");
-        }
+        auto it_cublas2 = curesults2.elapsed_ms.find({size_i, size_j});
+        if (it_first != first.elapsed_ms.end() && it_cublas != curesults.elapsed_ms.end() && it_cublas2 != curesults2.elapsed_ms.end()) {
+            printf(" QR  %8.02f  %8.02f %%  %8.02f %14.02f", it_first->second ,it_cublas->second/it_first->second *100, it_cublas->second, it_cublas2->second );
+        } 
+        it_first = first.elapsed_ms_mulx.find({size_i, size_j});
+        it_cublas = curesults.elapsed_ms_mulx.find({size_i, size_j});
+        it_cublas2 = curesults2.elapsed_ms_mulx.find({size_i, size_j});
+        if (it_first != first.elapsed_ms_mulx.end() && it_cublas != curesults.elapsed_ms_mulx.end()  && it_cublas2 != curesults2.elapsed_ms_mulx.end()) {
+            printf("      Qmul  %8.02f  %8.02f %%  %8.02f %14.02f", it_first->second ,it_cublas->second/it_first->second *100,  it_cublas->second, it_cublas2->second);
+        } 
         printf("\n");
     }
 }
@@ -979,28 +1094,30 @@ int main(int argc, char **argv) {
     }
 
     auto configs_test = std::vector<BenchmarkConfig>{
-        {{tilesize,tilesize}, {tilesize,2*tilesize},  {tilesize*2,tilesize}, {tilesize*2,tilesize*2}},
+        {{tilesize,tilesize}, {tilesize,2*tilesize},  {tilesize*2,tilesize}, {tilesize*2,tilesize*2} ,{128,128} },
     };
     auto configs = std::vector<BenchmarkConfig>{
-        {{128,128},{512,512},{2048,2048}},
+        {{tilesize,tilesize},{128,128},{512,512},{1024,1024},{2048,2048},{4096,4096},{8192,8192}},
     };
 
     
     auto data = read_test_data(Phase::TEST, test_data_dir, configs_test);
-    
+    get_cublas_results(Phase::WARMUP, data,configs_test);
     run_all_impls(Phase::TEST, data, configs_test);
-    /*
+    
     data = read_test_data(Phase::BENCHMARK, test_data_dir, configs);
-    run_all_impls(Phase::WARMUP, data, configs);
-    auto results = run_all_impls(Phase::BENCHMARK, data, configs);
     get_cublas_results(Phase::WARMUP, data,configs);
     auto curesults= get_cublas_results(Phase::BENCHMARK, data,configs);
-
-    for (int32_t j = 0; j < results.size(); ++j) {
-            print_speedup(configs, results.at(j),  curesults);
-    }
-    */
+    get_cublas_results_extended(Phase::WARMUP, data,configs);
+    auto curesults_ext= get_cublas_results(Phase::BENCHMARK, data,configs);
     
+    run_all_impls(Phase::WARMUP, data, configs);
+    auto results = run_all_impls(Phase::BENCHMARK, data, configs);
+    
+    for (int32_t j = 0; j < results.size(); ++j) {
+            print_speedup(configs, results.at(j),  curesults, curesults_ext);
+    }
+
             
     //write_json_results("out/results.json", results);
     return 0;
