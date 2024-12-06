@@ -19,7 +19,7 @@ nvcc -ccbin=g++-10 -std=c++20 benchmark.cu reference_kernels.cu -o benchmark -lc
 The QR kernels sorurce code can be found in /final_project_devctr/src/qr_kernels.cu and is designed after https://onlinelibrary.wiley.com/doi/full/10.1002/cpe.13010. The base implementation is copied from https://github.com/evelyne-ringoot/Avocado-sandwich/tree/main/KAbasedSVD/src and the reference implementation is cusolver cusolverDnDgeqrf.
 
 
-### Docker build
+### Docker build - Ubuntu
 
 To test the docker build (based on https://github.com/accelerated-computing-class/final_project_devctr):
 Execute once:
@@ -33,3 +33,10 @@ py <path_to_telerun.py> submit build.tar
 ```
 
 This will build a docker environment according to the /devctr/Dockerfile, build a tar file according to /src/build.sh and execute the /src/run.sh on telerun.
+
+### Windows build and run
+
+On windows, make sure to install CUDA toolkit 12.4.1, Visual Studio with C++ integration and then run the following code:
+```
+ powershell -executionpolicy bypass -File .\buildandrun.ps1
+ ```
