@@ -82,27 +82,13 @@ void launch_base_applyQt_singletile_evelyne(int size_in, int diag_iter, float co
 }
 
 template <int tile_size>
-__global__ void base_applyQt_singletile(int size_X, int row_stride_X, int row_stride_Q, float const *tau, float const* Q, float *X) {
+__global__ void base_applyQt_singletile(int size_X, int row_stride_X, int row_stride_Q, float const *taus, float const* Q, float *X) {
     auto total_num_threads = gridDim.x * blockDim.x;
     auto block_num_threads = blockDim.x;
     auto columns_per_block = ceil_div(size_X, gridDim.x);
 
     const auto column_prefetch_size = 256;
     __shared__ float column_prefetch[tile_size][column_prefetch_size];
-
-    // Load householder reflectors and taus
-    // NOTE: Probably PTX is only allocating half of the registers from householder_reflectors, since
-    //       we only use lower triangular part of the matrix.
-    float householder_reflectors[tile_size][tile_size];
-    float taus[tile_size];
-    for (auto reflector_idx = 0; reflector_idx < tile_size; reflector_idx++) {
-        taus[reflector_idx] = tau[reflector_idx];
-        for (auto element_idx = reflector_idx + 1; element_idx < tile_size; element_idx++) {
-            auto householder_reflector_i = element_idx;
-            auto householder_reflector_j = reflector_idx;
-            householder_reflectors[element_idx][reflector_idx] = Q[householder_reflector_i * row_stride_Q + householder_reflector_j];
-        }
-    }
 
     // Each prefetch step consists of loading a chunk of columns from DRAM into shmem, and then processing them
     auto block_column_base_idx = blockIdx.x * columns_per_block;
@@ -132,25 +118,33 @@ __global__ void base_applyQt_singletile(int size_X, int row_stride_X, int row_st
             }
 
             // Process current column by applying householder reflectors in reverse order
-            for (auto householder_reflector = 0; householder_reflector < tile_size; householder_reflector++) {
+            float tau;
+            float householder_reflector[tile_size];
+            for (auto householder_reflector_idx = 0; householder_reflector_idx < tile_size; householder_reflector_idx++) {
+                // for (auto i = householder_reflector_idx + 1; i < tile_size; i++) {
+                tau = __ldg(&taus[householder_reflector_idx]);
+                for (auto i = 0; i < tile_size; i++) {
+                    householder_reflector[i] = __ldg(&Q[i * row_stride_Q + householder_reflector_idx]);
+                }
+
                 // First we compute tau * (h' x)
                 auto effective_scaling = 0.0f;
                 for (auto element_idx = 0; element_idx < tile_size; element_idx++) {
-                    if (element_idx == householder_reflector) {
+                    if (element_idx == householder_reflector_idx) {
                         // Implicit leading 1 in householder reflector
                         effective_scaling += current_column[element_idx];
-                    } else if (element_idx > householder_reflector) {
-                        effective_scaling += householder_reflectors[element_idx][householder_reflector] * current_column[element_idx];
+                    } else if (element_idx > householder_reflector_idx) {
+                        effective_scaling += householder_reflector[element_idx] * current_column[element_idx];
                     }
                 }
-                effective_scaling *= taus[householder_reflector];
+                effective_scaling *= tau;
 
                 // We now compute h (tau * (h' x)) to wrap things up
                 for (auto element_idx = 0; element_idx < tile_size; element_idx++) {
-                    if (element_idx == householder_reflector) {
+                    if (element_idx == householder_reflector_idx) {
                         current_column[element_idx] -= effective_scaling;
-                    } else if (element_idx > householder_reflector) {
-                        current_column[element_idx] -= effective_scaling * householder_reflectors[element_idx][householder_reflector];
+                    } else if (element_idx > householder_reflector_idx) {
+                        current_column[element_idx] -= effective_scaling * householder_reflector[element_idx];
                     }
                 }
             }
