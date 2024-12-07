@@ -83,12 +83,14 @@ void launch_base_applyQt_singletile_evelyne(int size_in, int diag_iter, float co
 
 template <int tile_size>
 __global__ void base_applyQt_singletile(int size_X, int row_stride_X, int row_stride_Q, float const *taus, float const* Q, float *X) {
-    auto total_num_threads = gridDim.x * blockDim.x;
     auto block_num_threads = blockDim.x;
     auto columns_per_block = ceil_div(size_X, gridDim.x);
 
-    const auto column_prefetch_size = 256;
-    __shared__ float column_prefetch[tile_size][column_prefetch_size];
+    const auto column_prefetch_size = 128;
+    __shared__ float column_prefetch_1[tile_size * column_prefetch_size];
+    __shared__ float column_prefetch_2[tile_size * column_prefetch_size];
+    float* column_prefetch = column_prefetch_1;
+    float* column_prefetch_backup = column_prefetch_2;
 
     // Each prefetch step consists of loading a chunk of columns from DRAM into shmem, and then processing them
     auto block_column_base_idx = blockIdx.x * columns_per_block;
@@ -100,8 +102,10 @@ __global__ void base_applyQt_singletile(int size_X, int row_stride_X, int row_st
             auto local_prefetch_i = prefetch_element_idx / column_prefetch_size;
             auto global_prefetch_j = prefetch_column_base_idx + local_prefetch_j;
             auto global_prefetch_i = local_prefetch_i;
-            column_prefetch[local_prefetch_i][local_prefetch_j] = global_prefetch_j < size_X ? X[global_prefetch_i * row_stride_X + global_prefetch_j] : 0.0f;
+            column_prefetch[local_prefetch_i * column_prefetch_size + local_prefetch_j] = global_prefetch_j < size_X ? X[global_prefetch_i * row_stride_X + global_prefetch_j] : 0.0f;
         }
+
+        __syncthreads();
 
         float current_column[tile_size];
         for (auto current_column_in_prefetch_step = 0; current_column_in_prefetch_step < ceil_div(column_prefetch_size, block_num_threads); current_column_in_prefetch_step++) {
@@ -114,47 +118,54 @@ __global__ void base_applyQt_singletile(int size_X, int row_stride_X, int row_st
             // Load current column we are processing
             for (auto local_i = 0; local_i < tile_size; local_i++) {
                 auto current_column_i = local_i;
-                current_column[local_i] = column_prefetch[current_column_i][current_column_j_local];
+                current_column[local_i] = column_prefetch[current_column_i * column_prefetch_size + current_column_j_local];
             }
 
             // Process current column by applying householder reflectors in reverse order
             float tau;
             float householder_reflector[tile_size];
             for (auto householder_reflector_idx = 0; householder_reflector_idx < tile_size; householder_reflector_idx++) {
-                // for (auto i = householder_reflector_idx + 1; i < tile_size; i++) {
                 tau = __ldg(&taus[householder_reflector_idx]);
                 for (auto i = 0; i < tile_size; i++) {
-                    householder_reflector[i] = __ldg(&Q[i * row_stride_Q + householder_reflector_idx]);
+                    if (i == householder_reflector_idx) {
+                        householder_reflector[i] = 1.0f;
+                    } else if (i > householder_reflector_idx) {
+                        householder_reflector[i] = __ldg(&Q[i * row_stride_Q + householder_reflector_idx]);
+                    } else {
+                        householder_reflector[i] = 0.0f;
+                    }
                 }
 
                 // First we compute tau * (h' x)
                 auto effective_scaling = 0.0f;
                 for (auto element_idx = 0; element_idx < tile_size; element_idx++) {
-                    if (element_idx == householder_reflector_idx) {
-                        // Implicit leading 1 in householder reflector
-                        effective_scaling += current_column[element_idx];
-                    } else if (element_idx > householder_reflector_idx) {
-                        effective_scaling += householder_reflector[element_idx] * current_column[element_idx];
-                    }
+                    effective_scaling += householder_reflector[element_idx] * current_column[element_idx];
                 }
                 effective_scaling *= tau;
 
                 // We now compute h (tau * (h' x)) to wrap things up
                 for (auto element_idx = 0; element_idx < tile_size; element_idx++) {
-                    if (element_idx == householder_reflector_idx) {
-                        current_column[element_idx] -= effective_scaling;
-                    } else if (element_idx > householder_reflector_idx) {
-                        current_column[element_idx] -= effective_scaling * householder_reflector[element_idx];
-                    }
+                    current_column[element_idx] -= effective_scaling * householder_reflector[element_idx];
                 }
             }
 
-            // Write out processed column
+            // Write out processed column to shared
             for (auto local_i = 0; local_i < tile_size; local_i++) {
                 auto current_column_i = local_i;
-                X[current_column_i * row_stride_X + current_column_j] = current_column[local_i];
+                column_prefetch[current_column_i * column_prefetch_size + current_column_j_local] = current_column[local_i];
             }
         }
+
+        for (auto prefetch_element_idx = threadIdx.x; prefetch_element_idx < column_prefetch_size * tile_size; prefetch_element_idx += block_num_threads) {
+            auto local_prefetch_j = prefetch_element_idx % column_prefetch_size;
+            auto local_prefetch_i = prefetch_element_idx / column_prefetch_size;
+            auto global_prefetch_j = prefetch_column_base_idx + local_prefetch_j;
+            auto global_prefetch_i = local_prefetch_i;
+            if (global_prefetch_j < prefetch_column_base_idx + columns_per_block && global_prefetch_j < size_X)
+                X[global_prefetch_i * row_stride_X + global_prefetch_j] = column_prefetch[local_prefetch_i * column_prefetch_size + local_prefetch_j];
+        }
+
+        swap_pointers(&column_prefetch, &column_prefetch_backup);
     }
 }
 
@@ -167,7 +178,9 @@ void launch_base_applyQt_singletile(int size_in, int diag_iter, float const *tau
     auto X = &out[diag_iter * tilesize * size_in + (diag_iter + 1) * tilesize];
     auto taus = &tau[diag_iter * size_in];
 
-    base_applyQt_singletile<tilesize><<<tilesize, 4 * tilesize>>>(size_X, row_stride_X, row_stride_Q, taus, Q, X);
+    // const auto num_blocks = (size_in / tilesize - 1) - diag_iter;
+    const auto num_blocks = tilesize;
+    base_applyQt_singletile<tilesize><<<num_blocks, 4 * tilesize>>>(size_X, row_stride_X, row_stride_Q, taus, Q, X);
 }
 
 
