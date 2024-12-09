@@ -92,8 +92,11 @@ int main(int argc, char **argv) {
         QtKernel("Original (Evelyne)",
             launch_base_applyQt_singletile_evelyne
         ),
-        QtKernel("Improved (Lucas)",
+        QtKernel("Modified (Lucas)",
             launch_base_applyQt_singletile
+        ),
+        QtKernel("Tensor Core (Lucas)",
+            launch_base_applyQt_singletile_tc
         ),
         QtKernel("cuSOLVER (Fast)",
             // Preamble
@@ -183,7 +186,7 @@ int main(int argc, char **argv) {
                 tilesize, tilesize,
                 diag_tile,
                 tilesize,
-                d_tau + diag_iter * size_in,  // TODO: Clarify why this is the right format for tau
+                d_tau + diag_iter * size_in,
                 workspace,
                 lwork,
                 devInfo));
@@ -246,7 +249,8 @@ int main(int argc, char **argv) {
                 // Compare only the relevant tiles. We include the diagonal tiles since these should
                 // not be modified by the kernel
                 if (trial >= warmup_trials) {
-                    for (int tile = diag_iter; tile < size_in/tilesize; tile++) {
+                    auto tiles_to_evaluate = size_in / tilesize;
+                    for (int tile = diag_iter; tile < tiles_to_evaluate; tile++) {
                         for (int row = diag_iter * tilesize; row < (diag_iter + 1) * tilesize; row++) {
                             for (int col = tile * tilesize; col < (tile + 1) * tilesize; col++) {
                                 int col_major_idx = col * size_in + row;

@@ -10,7 +10,7 @@ sudo apt install g++-10
 To test the QRx and QRX kernels directly, run:
 ```
 cd inference
-nvcc -ccbin=g++-10 -std=c++20 benchmark.cu reference_kernels.cu -o benchmark -lcublas -lcurand -lcusolver
+nvcc -arch=sm_80 -ccbin=g++-10 -std=c++20 benchmark.cu reference_kernels.cu -o benchmark -lcublas -lcurand -lcusolver
 ./benchmark --verbose   # --verbose is optional
 ```
 

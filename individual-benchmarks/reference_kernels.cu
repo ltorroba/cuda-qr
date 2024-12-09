@@ -70,7 +70,7 @@ __global__ void base_applyQt_singletile_evelyne( //aplies Qt (given by household
 
 void launch_base_applyQt_singletile_evelyne(int size_in, int diag_iter, float const *tau, float *out) {
     const auto tilesize = 32;
-    const auto numthreads = 4;
+    const auto numthreads = 1;
 
     // Need to launch one block for tile to the right of the diagonal to be processed
     const auto num_blocks = (size_in / tilesize - 1) - diag_iter;
@@ -81,20 +81,20 @@ void launch_base_applyQt_singletile_evelyne(int size_in, int diag_iter, float co
     base_applyQt_singletile_evelyne<tilesize, numthreads><<<num_blocks, dim3(tilesize, numthreads)>>>(size_in, size_in, diag_iter, true, tau, out, out);
 }
 
-template <int tile_size>
+template <int tile_size, int columns_per_block, int threads_per_block>
 __global__ void base_applyQt_singletile(int size_X, int row_stride_X, int row_stride_Q, float const *taus, float const* Q, float *X) {
-    auto block_num_threads = blockDim.x;
-    auto columns_per_block = ceil_div(size_X, gridDim.x);
-
-    const auto column_prefetch_size = 128;
+    // TODO: Static assert that tile_size % microtile_size == 0
+    auto const block_num_threads = threads_per_block;
+    const auto microtile_size = columns_per_block / threads_per_block;
+    const auto column_prefetch_size = columns_per_block;
     __shared__ float column_prefetch_1[tile_size * column_prefetch_size];
-    __shared__ float column_prefetch_2[tile_size * column_prefetch_size];
+    // __shared__ float column_prefetch_2[tile_size * column_prefetch_size];
     float* column_prefetch = column_prefetch_1;
-    float* column_prefetch_backup = column_prefetch_2;
+    // float* column_prefetch_backup = column_prefetch_2;
 
     // Each prefetch step consists of loading a chunk of columns from DRAM into shmem, and then processing them
     auto block_column_base_idx = blockIdx.x * columns_per_block;
-    for (auto prefetch_step = 0; prefetch_step < ceil_div(columns_per_block, column_prefetch_size); prefetch_step++) {
+    for (auto prefetch_step = 0; prefetch_step < ceil_div_static(columns_per_block, column_prefetch_size); prefetch_step++) {
         auto prefetch_column_base_idx = block_column_base_idx + prefetch_step * column_prefetch_size;
 
         for (auto prefetch_element_idx = threadIdx.x; prefetch_element_idx < column_prefetch_size * tile_size; prefetch_element_idx += block_num_threads) {
@@ -105,67 +105,57 @@ __global__ void base_applyQt_singletile(int size_X, int row_stride_X, int row_st
             column_prefetch[local_prefetch_i * column_prefetch_size + local_prefetch_j] = global_prefetch_j < size_X ? X[global_prefetch_i * row_stride_X + global_prefetch_j] : 0.0f;
         }
 
-        __syncthreads();
+        auto early_exit = false;
+        for (auto current_microtile_in_prefetch_step = 0; current_microtile_in_prefetch_step < ceil_div_static(column_prefetch_size / microtile_size, block_num_threads); current_microtile_in_prefetch_step++) {
+            if (early_exit) break;
 
-        float current_column[tile_size];
-        for (auto current_column_in_prefetch_step = 0; current_column_in_prefetch_step < ceil_div(column_prefetch_size, block_num_threads); current_column_in_prefetch_step++) {
-            auto current_column_j_local = current_column_in_prefetch_step * block_num_threads + threadIdx.x;
-            auto current_column_j = prefetch_column_base_idx + current_column_j_local;
+            for (auto current_column_in_microtile = 0; current_column_in_microtile < microtile_size; current_column_in_microtile++) {
+                float current_column[tile_size];
 
-            if (current_column_j >= size_X || current_column_j >= prefetch_column_base_idx + column_prefetch_size || current_column_j >= block_column_base_idx + columns_per_block)
-                break;
+                auto current_column_j_local = (current_microtile_in_prefetch_step * block_num_threads + threadIdx.x) * microtile_size + current_column_in_microtile;
+                auto current_column_j = prefetch_column_base_idx + current_column_j_local;
 
-            // Load current column we are processing
-            for (auto local_i = 0; local_i < tile_size; local_i++) {
-                auto current_column_i = local_i;
-                current_column[local_i] = column_prefetch[current_column_i * column_prefetch_size + current_column_j_local];
-            }
+                if (current_column_j >= size_X) {
+                    early_exit = true;
+                    break;
+                }
 
-            // Process current column by applying householder reflectors in reverse order
-            float tau;
-            float householder_reflector[tile_size];
-            for (auto householder_reflector_idx = 0; householder_reflector_idx < tile_size; householder_reflector_idx++) {
-                tau = __ldg(&taus[householder_reflector_idx]);
-                for (auto i = 0; i < tile_size; i++) {
-                    if (i == householder_reflector_idx) {
-                        householder_reflector[i] = 1.0f;
-                    } else if (i > householder_reflector_idx) {
-                        householder_reflector[i] = __ldg(&Q[i * row_stride_Q + householder_reflector_idx]);
-                    } else {
-                        householder_reflector[i] = 0.0f;
+                // Load current column we are processing
+                for (auto local_i = 0; local_i < tile_size; local_i++) {
+                    auto current_column_i = local_i;
+                    current_column[local_i] = column_prefetch[current_column_i * column_prefetch_size + current_column_j_local];
+                }
+
+                // Process current column by applying householder reflectors
+                for (auto householder_reflector_idx = 0; householder_reflector_idx < tile_size; householder_reflector_idx++) {
+                    float householder_reflector[tile_size];
+                    float tau = taus[householder_reflector_idx];
+
+                    for (auto i = householder_reflector_idx; i < tile_size; i++) {
+                        householder_reflector[i] = Q[i * row_stride_Q + householder_reflector_idx];
                     }
-                }
 
-                // First we compute tau * (h' x)
-                auto effective_scaling = 0.0f;
-                for (auto element_idx = 0; element_idx < tile_size; element_idx++) {
-                    effective_scaling += householder_reflector[element_idx] * current_column[element_idx];
-                }
-                effective_scaling *= tau;
+                    // First we compute tau * (h' x)
+                    auto effective_scaling = current_column[householder_reflector_idx];
+                    for (auto element_idx = householder_reflector_idx + 1; element_idx < tile_size; element_idx++) {
+                        effective_scaling += householder_reflector[element_idx] * current_column[element_idx];
+                    }
+                    effective_scaling *= tau;
 
-                // We now compute h (tau * (h' x)) to wrap things up
-                for (auto element_idx = 0; element_idx < tile_size; element_idx++) {
-                    current_column[element_idx] -= effective_scaling * householder_reflector[element_idx];
-                }
-            }
+                    // We now compute h (tau * (h' x)) to wrap things up
+                    current_column[householder_reflector_idx] -= effective_scaling;
+                    for (auto element_idx = householder_reflector_idx + 1; element_idx < tile_size; element_idx++) {
+                        current_column[element_idx] -= effective_scaling * householder_reflector[element_idx];
+                    }
 
-            // Write out processed column to shared
-            for (auto local_i = 0; local_i < tile_size; local_i++) {
-                auto current_column_i = local_i;
-                column_prefetch[current_column_i * column_prefetch_size + current_column_j_local] = current_column[local_i];
+                    // We actually know that all elements <= householder_reflector_idx will remain unchanged from now on,
+                    // so we can commit these changes to global memory already
+                    X[householder_reflector_idx * row_stride_X + current_column_j] = current_column[householder_reflector_idx];
+                }
             }
         }
 
-        for (auto prefetch_element_idx = threadIdx.x; prefetch_element_idx < column_prefetch_size * tile_size; prefetch_element_idx += block_num_threads) {
-            auto local_prefetch_j = prefetch_element_idx % column_prefetch_size;
-            auto local_prefetch_i = prefetch_element_idx / column_prefetch_size;
-            auto global_prefetch_j = prefetch_column_base_idx + local_prefetch_j;
-            auto global_prefetch_i = local_prefetch_i;
-            if (global_prefetch_j < prefetch_column_base_idx + columns_per_block && global_prefetch_j < size_X)
-                X[global_prefetch_i * row_stride_X + global_prefetch_j] = column_prefetch[local_prefetch_i * column_prefetch_size + local_prefetch_j];
-        }
-
-        swap_pointers(&column_prefetch, &column_prefetch_backup);
+        // swap_pointers(&column_prefetch, &column_prefetch_backup);
     }
 }
 
@@ -179,10 +169,11 @@ void launch_base_applyQt_singletile(int size_in, int diag_iter, float const *tau
     auto taus = &tau[diag_iter * size_in];
 
     // const auto num_blocks = (size_in / tilesize - 1) - diag_iter;
-    const auto num_blocks = tilesize;
-    base_applyQt_singletile<tilesize><<<num_blocks, 4 * tilesize>>>(size_X, row_stride_X, row_stride_Q, taus, Q, X);
+    const auto columns_per_block = 32;
+    const auto threads_per_block = 32;
+    auto num_blocks = ceil_div(size_X, columns_per_block);
+    base_applyQt_singletile<tilesize, columns_per_block, threads_per_block><<<num_blocks, threads_per_block>>>(size_X, row_stride_X, row_stride_Q, taus, Q, X);
 }
-
 
 void reference_applyQt(int size_in, int diag_iter, const float* tau, float* matrix) {
     cusolverDnHandle_t handle;
@@ -400,3 +391,229 @@ void reference_applyQt_fast_postamble(int size_in, int diag_iter, const float* t
     CHECK_CUSOLVER(cusolverDnDestroy(workspace->handle));
     delete workspace;
 }
+
+//////// TENSOR CORE IMPLEMENTATION
+
+__device__ float get_reflector_coordinate(int reflector_idx, int coordinate_idx, int row_stride_Q, float const* Q) {
+    return coordinate_idx > reflector_idx ? Q[coordinate_idx * row_stride_Q + reflector_idx] : (coordinate_idx == reflector_idx ? 1.0f : 0.0f);
+}
+
+template <int threads_per_block, int num_householder_vectors, int vector_dim>
+__device__ void materialize_reflector_pair_async(int reflector_1, int reflector_2, int row_stride_Q, float const* taus, float const* Q, float const* alphas, float* out) {
+    // TODO: Optimizations
+    //      - We can assume that reflector_1 < reflector_2 always
+    //      - Since reflectors are adjacent, we can probably save compute
+    for (auto element_idx = threadIdx.x; element_idx < vector_dim * vector_dim; element_idx += threads_per_block) {
+        auto i_idx = element_idx / vector_dim;
+        auto j_idx = element_idx % vector_dim;
+
+        auto tau_i = taus[i_idx];
+        auto tau_j = taus[j_idx];
+
+        auto reflector_1_i = get_reflector_coordinate(reflector_1, i_idx, row_stride_Q, Q);
+        auto reflector_1_j = get_reflector_coordinate(reflector_1, j_idx, row_stride_Q, Q);
+        auto reflector_2_i = get_reflector_coordinate(reflector_2, i_idx, row_stride_Q, Q);
+        auto reflector_2_j = get_reflector_coordinate(reflector_2, j_idx, row_stride_Q, Q);
+
+        auto alpha_ij = alphas[i_idx * num_householder_vectors + j_idx];
+
+        // Dirac (i.e. identity-matrix component) along diagonal
+        auto accumulator = i_idx == j_idx ? 1.0f : 0.0f;
+
+        // reflector_1 term
+        accumulator -= tau_i * reflector_1_i * reflector_1_j;
+
+        // reflector_2 term
+        accumulator -= tau_j * reflector_2_i * reflector_2_j;
+
+        // cross term
+        accumulator -= tau_i * tau_j * alpha_ij * reflector_1_i * reflector_2_j;
+
+        out[i_idx * vector_dim + j_idx] = accumulator;
+    }
+}
+
+template <int tile_size, int threads_per_block>
+__device__ void tile_multiply_accumulate_async(int row_stride_tile_A, int row_stride_tile_B, int row_stride_tile_C, float* tile_A, float* tile_B, float* tile_C) {
+    constexpr auto num_warps_in_block = threads_per_block / 32;
+    constexpr auto subtiles_per_row = tile_size / 8;
+    auto tidx = threadIdx.x;
+    const auto warp_idx = tidx / 32;
+
+    for (auto subtile_idx = warp_idx; subtile_idx < tile_size * tile_size / (16 * 8); subtile_idx += num_warps_in_block) {
+        // Calculate indices of the 16 x 8 subtile of the product AB that we will be responsible for computing here
+        auto subtile_i = subtile_idx / subtiles_per_row;
+        auto subtile_j = subtile_idx % subtiles_per_row;
+
+        // These are the indices of the 16 x 8 warptile we are currently processing
+        // that this thread will emit
+        const int32_t c_1_local_idx = 2 * tidx;
+        const int32_t c_2_local_idx = 2 * tidx + 1;
+        const int32_t c_3_local_idx = c_1_local_idx + 64;
+        const int32_t c_4_local_idx = c_2_local_idx + 64;
+
+        // Create accumulators for final result
+        float c_1 = 0.0f;
+        float c_2 = 0.0f;
+        float c_3 = 0.0f;
+        float c_4 = 0.0f;
+
+        for (auto k_idx = 0; k_idx < tile_size / 8; k_idx++) {
+            // LOAD THE CORRECT 16X8 FRAGMENT OF A
+            // Compute the indices of the 16 x 8 slice of A that need to be pulled for the tensor core computation
+            int32_t a_1_local_idx = 2 * 4 * (tidx / 4) + tidx % 4;
+            int32_t a_2_local_idx = a_1_local_idx + 64;
+            int32_t a_3_local_idx = a_1_local_idx + 4;
+            int32_t a_4_local_idx = a_2_local_idx + 4;
+
+            // Compute what those indices correspond to in tile_A [basically (local_i_coord) * row_stride_tile_A + (local_k_coord)]
+            int32_t a_1_tile_idx = (subtile_i * 16 + a_1_local_idx / 8) * row_stride_tile_A + (k_idx * 8 + a_1_local_idx % 8);
+            int32_t a_2_tile_idx = (subtile_i * 16 + a_2_local_idx / 8) * row_stride_tile_A + (k_idx * 8 + a_2_local_idx % 8);
+            int32_t a_3_tile_idx = (subtile_i * 16 + a_3_local_idx / 8) * row_stride_tile_A + (k_idx * 8 + a_3_local_idx % 8);
+            int32_t a_4_tile_idx = (subtile_i * 16 + a_4_local_idx / 8) * row_stride_tile_A + (k_idx * 8 + a_4_local_idx % 8);
+
+            float a_1 = tile_A[a_1_tile_idx];
+            float a_2 = tile_A[a_2_tile_idx];
+            float a_3 = tile_A[a_3_tile_idx];
+            float a_4 = tile_A[a_4_tile_idx];
+
+            // LOAD TILE B
+            // Compute the indices of the 8 x 8 microtile of B that need to be pulled for the tensor core computation
+            int32_t b_1_local_idx = (tidx * 8) % 32 + tidx / 4;
+            int32_t b_2_local_idx = b_1_local_idx + 32;
+
+            // Compute what those indices correspond to in the SMEM tile of B [basically (local_k_coord) * tile_size_j + (local_j_coord)]
+            int32_t b_1_tile_idx = (k_idx * 8 + b_1_local_idx / 8) * row_stride_tile_B + (subtile_j * 8 + b_1_local_idx % 8);
+            int32_t b_2_tile_idx = (k_idx * 8 + b_2_local_idx / 8) * row_stride_tile_B + (subtile_j * 8 + b_2_local_idx % 8);
+
+            float b_1 = tile_B[b_1_tile_idx];
+            float b_2 = tile_B[b_2_tile_idx];
+
+            uint32_t ua_1 = __float_as_uint(a_1);
+            uint32_t ua_2 = __float_as_uint(a_2);
+            uint32_t ua_3 = __float_as_uint(a_3);
+            uint32_t ua_4 = __float_as_uint(a_4);
+
+            uint32_t ub_1 = __float_as_uint(b_1);
+            uint32_t ub_2 = __float_as_uint(b_2);
+
+            uint32_t uc_1 = __float_as_uint(c_1);
+            uint32_t uc_2 = __float_as_uint(c_2);
+            uint32_t uc_3 = __float_as_uint(c_3);
+            uint32_t uc_4 = __float_as_uint(c_4);
+
+            asm(
+                "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32"
+                "{%0, %1, %2, %3},     /* 'D' matrix */"
+                "{%4, %5, %6, %7},     /* 'A' matrix */"
+                "{%8, %9},             /* 'B' matrix */"
+                "{%10, %11, %12, %13}; /* 'C' matrix */"
+                : "=r"(uc_1), "=r"(uc_2), "=r"(uc_3), "=r"(uc_4)
+                : "r"(ua_1), "r"(ua_2), "r"(ua_3), "r"(ua_4) , "r"(ub_1), "r"(ub_2), "r"(uc_1), "r"(uc_2), "r"(uc_3), "r"(uc_4)
+            );
+
+            c_1 = __uint_as_float(uc_1);
+            c_2 = __uint_as_float(uc_2);
+            c_3 = __uint_as_float(uc_3);
+            c_4 = __uint_as_float(uc_4);
+
+            int32_t c_1_global_idx = (subtile_i * 16 + (c_1_local_idx / 8)) * row_stride_tile_C + (subtile_j * 8 + c_1_local_idx % 8);
+            int32_t c_2_global_idx = (subtile_i * 16 + (c_2_local_idx / 8)) * row_stride_tile_C + (subtile_j * 8 + c_2_local_idx % 8);
+            int32_t c_3_global_idx = (subtile_i * 16 + (c_3_local_idx / 8)) * row_stride_tile_C + (subtile_j * 8 + c_3_local_idx % 8);
+            int32_t c_4_global_idx = (subtile_i * 16 + (c_4_local_idx / 8)) * row_stride_tile_C + (subtile_j * 8 + c_4_local_idx % 8);
+
+            tile_C[c_1_global_idx] = c_1;
+            tile_C[c_2_global_idx] = c_2;
+            tile_C[c_3_global_idx] = c_3;
+            tile_C[c_4_global_idx] = c_4;
+        }
+    }
+}
+
+template <int tile_size, int threads_per_block>
+__global__ void base_applyQt_singletile_tc(int size_X, int row_stride_X, int row_stride_Q, float const *taus, float const* Q, float *X) {
+    __shared__ float alphas[tile_size * tile_size];
+
+    // We assume that we have tile_size vectors each with (implict) dimensionality tile_size
+    auto const num_householder_vectors = tile_size;
+    auto const vector_dim = tile_size;
+
+    __shared__ float tile_buffer_1[vector_dim * vector_dim];
+    __shared__ float tile_buffer_2[vector_dim * vector_dim];
+    __shared__ float tile_buffer_3[vector_dim * vector_dim];
+
+    float* reflector_matrix = tile_buffer_1;
+    float* tile_buffer = tile_buffer_2;
+    float* tile_buffer_backup = tile_buffer_3;
+
+    // Compute alphas across a block
+    // TODO: Optimizations:
+    //    - alpha is symmetric, so only need to compute lower triangle
+    //    - can probably improve things by forcing elements to be consecutive, which means compiler will do register reuse
+    for (auto element_idx = threadIdx.x; element_idx < num_householder_vectors * num_householder_vectors; element_idx += threads_per_block) {
+        auto i_idx = element_idx / num_householder_vectors;
+        auto j_idx = element_idx % num_householder_vectors;
+
+        auto result = 0.0f;
+        for (auto coordinate = 0; coordinate < vector_dim; coordinate++) {
+            auto i_coord_val = get_reflector_coordinate(i_idx, coordinate, row_stride_Q, Q);
+            auto j_coord_val = get_reflector_coordinate(j_idx, coordinate, row_stride_Q, Q);
+            result += i_coord_val * j_coord_val;
+        }
+
+        alphas[i_idx * tile_size + j_idx] = result;
+    }
+
+    __syncthreads();
+
+    // Materialize matrix for first pair of reflectors
+    materialize_reflector_pair_async<threads_per_block, num_householder_vectors, vector_dim>(0, 1, row_stride_Q, taus, Q, alphas, reflector_matrix);
+
+    for (auto pair_idx = 1; pair_idx < tile_size / 2; pair_idx++) {
+        materialize_reflector_pair_async<threads_per_block, num_householder_vectors, vector_dim>(2 * pair_idx, 2 * pair_idx + 1, row_stride_Q, taus, Q, alphas, tile_buffer);
+        __syncthreads();
+        tile_multiply_accumulate_async<threads_per_block, tile_size>(tile_size, tile_size, tile_size, reflector_matrix, tile_buffer, tile_buffer_backup);
+        swap_pointers(&tile_buffer_backup, &reflector_matrix);
+        __syncthreads();
+    }
+
+    __syncthreads();
+
+    // Perform the actual matmul
+    for (auto tile_idx = blockIdx.x; tile_idx < ceil_div(size_X, tile_size); tile_idx += gridDim.x) {
+        // Load tile into shared memory
+        for (auto element_idx = threadIdx.x; element_idx < tile_size * tile_size; element_idx += threads_per_block) {
+            auto i_idx = element_idx / tile_size;
+            auto j_idx = element_idx % tile_size;
+            tile_buffer[i_idx * tile_size + j_idx] = X[i_idx * row_stride_X + j_idx];
+        }
+        __syncthreads();
+
+        // Perform tile matmul
+        tile_multiply_accumulate_async<threads_per_block, tile_size>(tile_size, tile_size, tile_size, reflector_matrix, tile_buffer, tile_buffer_2);
+        __syncthreads();
+
+        // Store output tile back to global memory
+        for (auto element_idx = threadIdx.x; element_idx < tile_size * tile_size; element_idx += threads_per_block) {
+            auto i_idx = element_idx / tile_size;
+            auto j_idx = element_idx % tile_size;
+            X[i_idx * row_stride_X + j_idx] = tile_buffer_2[i_idx * tile_size + j_idx];
+        }
+        __syncthreads();
+    }
+}
+
+void launch_base_applyQt_singletile_tc(int size_in, int diag_iter, float const *tau, float *out) {
+    const auto tilesize = 32;
+    auto size_X = size_in - (diag_iter + 1) * tilesize;
+    auto row_stride_Q = size_in;
+    auto row_stride_X = size_in;
+    auto Q = &out[diag_iter * tilesize * size_in + diag_iter * tilesize];
+    auto X = &out[diag_iter * tilesize * size_in + (diag_iter + 1) * tilesize];
+    auto taus = &tau[diag_iter * size_in];
+
+    auto num_blocks = ceil_div(size_X, 32);
+    auto const threads_per_block = 32;
+    base_applyQt_singletile_tc<tilesize, threads_per_block><<<num_blocks, threads_per_block>>>(size_X, row_stride_X, row_stride_Q, taus, Q, X);
+}
+
