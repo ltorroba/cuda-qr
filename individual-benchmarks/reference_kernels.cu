@@ -428,7 +428,7 @@ __device__ void materialize_reflector_pair_async(int reflector_L, int reflector_
         accumulator -= tau_R * reflector_R_i * reflector_R_j;
 
         // cross term
-        accumulator -= tau_L * tau_R * alpha_LR * reflector_L_i * reflector_R_j;
+        accumulator += tau_L * tau_R * alpha_LR * reflector_L_i * reflector_R_j;
 
         out[i_idx * vector_dim + j_idx] = accumulator;
     }
@@ -573,7 +573,7 @@ __global__ void base_applyQt_singletile_tc(int size_X, int row_stride_X, int row
     for (auto pair_idx = 1; pair_idx < tile_size / 2; pair_idx++) {
         materialize_reflector_pair_async<threads_per_block, num_householder_vectors, vector_dim>(2 * pair_idx + 1, 2 * pair_idx, row_stride_Q, taus, Q, alphas, tile_buffer);
         __syncthreads();
-        tile_multiply_accumulate_async<threads_per_block, tile_size>(tile_size, tile_size, tile_size, tile_buffer, reflector_matrix, tile_buffer_backup);
+        tile_multiply_accumulate_async<tile_size, threads_per_block>(tile_size, tile_size, tile_size, tile_buffer, reflector_matrix, tile_buffer_backup);
         swap_pointers(&tile_buffer_backup, &reflector_matrix);
         __syncthreads();
     }
@@ -589,14 +589,14 @@ __global__ void base_applyQt_singletile_tc(int size_X, int row_stride_X, int row
         __syncthreads();
 
         // Perform tile matmul
-        tile_multiply_accumulate_async<threads_per_block, tile_size>(tile_size, tile_size, tile_size, reflector_matrix, tile_buffer, tile_buffer_2);
+        tile_multiply_accumulate_async<tile_size, threads_per_block>(tile_size, tile_size, tile_size, reflector_matrix, tile_buffer, tile_buffer_backup);
         __syncthreads();
 
         // Store output tile back to global memory
         for (auto element_idx = threadIdx.x; element_idx < tile_size * tile_size; element_idx += threads_per_block) {
             auto i_idx = element_idx / tile_size;
             auto j_idx = element_idx % tile_size;
-            X[i_idx * row_stride_X + (tile_idx * tile_size + j_idx)] = tile_buffer_2[i_idx * tile_size + j_idx];
+            X[i_idx * row_stride_X + (tile_idx * tile_size + j_idx)] = tile_buffer_backup[i_idx * tile_size + j_idx];
         }
         __syncthreads();
     }
@@ -611,7 +611,7 @@ void launch_base_applyQt_singletile_tc(int size_in, int diag_iter, float const *
     auto X = &out[diag_iter * tilesize * size_in + (diag_iter + 1) * tilesize];
     auto taus = &tau[diag_iter * size_in];
 
-    auto num_blocks = ceil_div(size_X, 32);
+    auto num_blocks = ceil_div(size_X, tilesize);
     auto const threads_per_block = 32;
     base_applyQt_singletile_tc<tilesize, threads_per_block><<<num_blocks, threads_per_block>>>(size_X, row_stride_X, row_stride_Q, taus, Q, X);
 }
