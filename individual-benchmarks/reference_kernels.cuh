@@ -10,3 +10,4 @@ void launch_base_applyQt_singletile(int size_in, int diag_iter, const float* tau
 void launch_base_applyQt_singletile_tc(int size_in, int diag_iter, const float* tau, float* out);
 
 void launch_base_applyQt_singletile_evelyne(int size_in, int diag_iter, const float* tau, float* out);
+void launch_base_applyQt_singletile_evelyne_2(int size_in, int diag_iter, const float* tau, float* out);

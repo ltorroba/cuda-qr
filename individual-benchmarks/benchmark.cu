@@ -92,13 +92,16 @@ int main(int argc, char **argv) {
         QtKernel("Original (Evelyne)",
             launch_base_applyQt_singletile_evelyne
         ),
+        QtKernel("Improved (Evelyne)",
+            launch_base_applyQt_singletile_evelyne_2
+        ),
         QtKernel("Modified (Lucas)",
             launch_base_applyQt_singletile
         ),
         QtKernel("Tensor Core (Lucas)",
             launch_base_applyQt_singletile_tc
         ),
-        QtKernel("cuSOLVER (Fast)",
+        QtKernel("cuSOLVER",
             // Preamble
             [](int size_in, int diag_iter, const float* tau, float* matrix_out) -> void* {
                 return reference_applyQt_fast_preamble(size_in, diag_iter, tau, matrix_out);
@@ -284,7 +287,7 @@ int main(int argc, char **argv) {
         }
 
         // Print a progress message every 100 trials
-        if (trial > warmup_trials && (trial - warmup_trials) % 100 == 0) {
+        if (trial > warmup_trials && (trial - warmup_trials) % 10 == 0) {
             std::cout << "Trial " << trial << " completed\n";
         }
     }

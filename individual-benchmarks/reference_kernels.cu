@@ -81,6 +81,66 @@ void launch_base_applyQt_singletile_evelyne(int size_in, int diag_iter, float co
     base_applyQt_singletile_evelyne<tilesize, numthreads><<<num_blocks, dim3(tilesize, numthreads)>>>(size_in, size_in, diag_iter, true, tau, out, out);
 }
 
+
+template <int tilesize>
+__global__ void base_applyQt_singletile_evelyne_2( //aplies Qt (given by householder reflectors on diagonal tile k) to the remainder of the row
+    int size_in,
+    int size_out,
+    int diag_iter,
+    bool offsetdiag,
+    float const *tau,
+    float *in, float *out) {
+    int g = blockIdx.x;
+    int i = threadIdx.x;
+    float outs[tilesize];
+    __shared__ float Qs[tilesize];
+    int diagstartidx=diag_iter*tilesize;
+    int tileoffset=(g)*tilesize;
+    if (offsetdiag){
+        tileoffset+=diagstartidx+tilesize;
+    }
+
+
+    for (int l=0;l<tilesize;l++){
+        outs[l]=out[(l+diagstartidx)*size_out+i+tileoffset];
+    }
+
+
+    __syncthreads();
+
+    for (int k=0;k<tilesize-1;k++){
+        Qs[i]=in[(i+diagstartidx)*size_in+k+diagstartidx];
+        __syncthreads();
+        float tmp_sum = 0.0f;
+        for (int l=k+1;l<tilesize;l++){
+            tmp_sum+= Qs[l]*outs[l];
+        }
+        tmp_sum+=outs[k];
+        tmp_sum*=tau[(diag_iter)*size_in+k];
+        for (int l=k+1;l<tilesize;l++){
+            outs[l]-=tmp_sum*Qs[l];
+        }
+        outs[k]-=tmp_sum;
+        __syncthreads();
+    }
+
+    for (int l=0;l<tilesize;l++){
+        out[(l+diagstartidx)*size_out+i+tileoffset]=outs[l];
+    }
+}
+
+void launch_base_applyQt_singletile_evelyne_2(int size_in, int diag_iter, float const *tau, float *out) {
+    const auto tilesize = 32;
+
+    // Need to launch one block for tile to the right of the diagonal to be processed
+    const auto num_blocks = (size_in / tilesize - 1) - diag_iter;
+
+    if (num_blocks <= 0)
+        return;
+
+    base_applyQt_singletile_evelyne_2<tilesize><<<num_blocks, dim3(tilesize)>>>(size_in, size_in, diag_iter, true, tau, out, out);
+}
+
 template <int tile_size, int columns_per_block, int threads_per_block>
 __global__ void base_applyQt_singletile(int size_X, int row_stride_X, int row_stride_Q, float const *taus, float const* Q, float *X) {
     // TODO: Static assert that tile_size % microtile_size == 0
@@ -611,7 +671,7 @@ void launch_base_applyQt_singletile_tc(int size_in, int diag_iter, float const *
     auto X = &out[diag_iter * tilesize * size_in + (diag_iter + 1) * tilesize];
     auto taus = &tau[diag_iter * size_in];
 
-    auto num_blocks = ceil_div(size_X, tilesize);
+    auto num_blocks = ceil_div(size_X, 8 * tilesize);
     auto const threads_per_block = 32;
     base_applyQt_singletile_tc<tilesize, threads_per_block><<<num_blocks, threads_per_block>>>(size_X, row_stride_X, row_stride_Q, taus, Q, X);
 }
