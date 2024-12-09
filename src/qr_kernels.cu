@@ -230,7 +230,7 @@ namespace qr_multi {
 
         for (int microiter=0; microiter<nummicrotiles; microiter++){
             int microdiagoffset=microiter*microtilesize;
-            for (int microrow=0;microrow<nummicrotiles;microrow++){
+            for (int microrow=0;microrow+microiter<nummicrotiles;microrow++){
                 
                 int microrowoffset=microrow*microtilesize;
                 int tileoffset= (microrow==0 ? 0 : 1);
@@ -240,12 +240,14 @@ namespace qr_multi {
                 for (int k=0; k<microtilesize;k++){
                         for (int j=i; j<microtilesize; j+=numthreadsqr){
                             outs[k+(microrow!=0)*microtilesize][j/numthreadsqr]=out[(k+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+diagstartidx+microdiagoffset];
+                            printf("idx %d %d in block %d loading %d %6.02f\n",j,k,i2,(k+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+diagstartidx+microdiagoffset,outs[k+(microrow!=0)*microtilesize][j/numthreadsqr]);
                         }
                     }  
                 }else{
                     for (int k=0; k<microtilesize;k++){
                         for (int j=(1+microiter)*microtilesize+i, l=0; j<microtilesize*nummicrotiles; j+=numthreadsqr*(nummicroblocksqr-1), l++){
                             outs[k+(microrow!=0)*microtilesize][l]=out[(k+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+diagstartidx+microdiagoffset];
+                            printf("idx %d %d in block %d loading %d %6.02f\n",j,k,i2,(k+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+diagstartidx+microdiagoffset,outs[k+(microrow!=0)*microtilesize][l]);
                         }
                     }
                 }
@@ -293,6 +295,7 @@ namespace qr_multi {
                             if (microrow!=0){
                                 for (int j=i; j<microtilesize; j+=numthreadsqr){
                                     out[(iter+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+diagstartidx+microdiagoffset]=outs[iter+microtilesize][j/numthreadsqr];
+                                    printf("writing back idx %d %d in block %d value %6.02f\n", j,iter, i2,outs[iter+microtilesize][j/numthreadsqr] );
                                 }
                             }
                             
@@ -316,14 +319,13 @@ namespace qr_multi {
                     
                         }
                         if (microrow!=0){
-                            for (int j=(1+microiter)*microtilesize+i; j<microtilesize*nummicrotiles; j+=numthreadsqr*(nummicroblocksqr-1)){
-                                out[(iter+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+diagstartidx+microdiagoffset]=outs[iter+microtilesize][j/numthreadsqr];
+                            for (int j=(1+microiter)*microtilesize+i, l=0; j<microtilesize*nummicrotiles; j+=numthreadsqr*(nummicroblocksqr-1),l++){
+                                out[(iter+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+diagstartidx+microdiagoffset]=outs[iter+microtilesize][l];
+                                printf("writing back idx %d %d in block %d value %6.02f\n", j,iter, i2,outs[iter+microtilesize][l] );
                             }
-                            
-                        }
-                            
-                        
+                        }  
                     }
+                    
                 
                     
                     __syncthreads();
@@ -332,10 +334,12 @@ namespace qr_multi {
                     if (i2==0){
                         for (int j=i; j<microtilesize; j+=numthreadsqr){
                             out[(microtilesize-1+diagstartidx)*size_in+j+diagstartidx]=outs[microtilesize-1][j/numthreadsqr];
+                            printf("writing back idx %d %d in block %d value %6.02f\n", j,microtilesize-1, i2,outs[microtilesize-1][j/numthreadsqr] );
                         }   
                     }else{
-                        for (int j=(1+microiter)*microtilesize+i; j<microtilesize*nummicrotiles; j+=numthreadsqr*(nummicroblocksqr-1)){
-                            out[(microtilesize-1+diagstartidx+microdiagoffset)*size_in+j+diagstartidx+microdiagoffset]=outs[microtilesize-1][j/numthreadsqr];
+                        for (int j=(1+microiter)*microtilesize+i, l=0; j<microtilesize*nummicrotiles; j+=numthreadsqr*(nummicroblocksqr-1), l++){
+                            out[(microtilesize-1+diagstartidx+microdiagoffset)*size_in+j+diagstartidx+microdiagoffset]=outs[microtilesize-1][l];
+                            printf("writing back idx %d %d in block %d value %6.02f\n", j,microtilesize-1, i2,outs[microtilesize-1][l] );
                         }
                     }
                     
@@ -343,19 +347,7 @@ namespace qr_multi {
                 
                 
             }
-            if (i2==0){
-                for (int k=0; k<microtilesize;k++){
-                    for (int j=i; j<microtilesize; j+=numthreadsqr){
-                        out[(k+diagstartidx+microdiagoffset)*size_in+j+diagstartidx+microdiagoffset]=outs[k][j/numthreadsqr];
-                    }
-                }  
-            }else{
-                for (int k=0; k<microtilesize;k++){
-                    for (int j=(1+microiter)*microtilesize+i; j<microtilesize*nummicrotiles; j+=numthreadsqr*(nummicroblocksqr-1)){
-                        out[(k+diagstartidx+microdiagoffset)*size_in+j+diagstartidx+microdiagoffset]=outs[k][j/numthreadsqr];
-                    }
-                }
-            }
+            
         }
         
             
@@ -1453,7 +1445,10 @@ TestData read_test_data(Phase phase,
                 size_i * size_j);
         }
         
-            
+        printf("\n  input:\n");
+        auto const &adata = data.a.at({size_i, size_j});
+        print_matrix(size_i, size_j,adata );
+        
 
     }
     return data;
