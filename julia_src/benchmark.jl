@@ -5,7 +5,7 @@ include("cusol_funcs.jl")
 
 
 elty=Float32
-sizes=[32,128,512,1024,2048,4096,8192]
+sizes=[32,128,512,1024,2048,4096]
 
 println( " size    type   RRMSE    time (ms)  vs CUSOLVER  cutime(ms)  cutime_ext  type     RRMSE     time (ms)  vs CUSOLVER    cutime(ms)  cutime_ext");
 println(" ------  ----  --------  --------  ------------  ----------  ----------  ------  ---------  --------   -------------  ----------  -----------");
@@ -47,4 +47,4 @@ end
 
 
 
-
+#to do: @cuda always_inline=true,  @cuda fastmath=true,int32, streams

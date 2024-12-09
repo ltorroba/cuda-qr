@@ -212,7 +212,7 @@ end
 
 
 TILE_SIZE=32
-TILE_SIZE2=4 
+TILE_SIZE2=4
 
 get_tileview(A, row , col, TILE_SIZEx, TILE_SIZEy ) = view(A, (row-1)*TILE_SIZEx.+(1:TILE_SIZEx),(col-1)*TILE_SIZEy.+(1:TILE_SIZEy))
 get_rowview(A, row, startcol, TILE_SIZEx, TILE_SIZEy) =  view(A, (row-1)*TILE_SIZEx .+(1:TILE_SIZEx),((startcol-1)*TILE_SIZEy +1):size(A,2))
@@ -243,15 +243,26 @@ Qtapply2_par_full!(B, A, Tau, row,k) = applyQorQt_unsafe_kernel2_2d!(backend, (T
 #Threads.@spawn begin, CUDA.@sync begin
     
 function mygeqrf!(A, Tau, nbtiles)
+    QR1!(A,Tau, 1)
     for k in 1:(nbtiles-1)
-        QR1!(A,Tau, k)
-        Qtapply1_par!(A, Tau, k)
+        @sync begin
+            @async QR2!(A,Tau, k+1,k)
+            @async Qtapply1_par!(A, Tau, k)
+        end
         for row in k+1:nbtiles
-            QR2!(A,Tau, row,k)
-            Qtapply2_par!(A,Tau, row,k)
+            @sync begin
+                if (row<nbtiles)
+                    @async QR2!(A,Tau, row+1,k)
+                elseif (k<nbtiles-1)
+                    @async QR1!(A,Tau, k+1)
+                end
+                @async Qtapply2_par!(A,Tau, row,k)
+            end
         end
     end
-    QR1!(A,Tau, nbtiles)
+    if(nbtiles>1)
+        QR1!(A,Tau, nbtiles)
+    end
     return A
 end
 
@@ -265,3 +276,18 @@ function myormqr!(B, A, Tau, nbtiles)
     end
     return B
 end
+
+#=
+function mygeqrf!(A, Tau, nbtiles)
+    for k in 1:(nbtiles-1)
+        QR1!(A,Tau, k)
+        Qtapply1_par!(A, Tau, k)
+        for row in k+1:nbtiles
+            QR2!(A,Tau, row,k)
+            Qtapply2_par!(A,Tau, row,k)
+        end
+    end
+    QR1!(A,Tau, nbtiles)
+    return A
+end
+=#
