@@ -399,7 +399,7 @@ __device__ float get_reflector_coordinate(int reflector_idx, int coordinate_idx,
 }
 
 template <int threads_per_block, int num_householder_vectors, int vector_dim>
-__device__ void materialize_reflector_pair_async(int reflector_1, int reflector_2, int row_stride_Q, float const* taus, float const* Q, float const* alphas, float* out) {
+__device__ void materialize_reflector_pair_async(int reflector_L, int reflector_R, int row_stride_Q, float const* taus, float const* Q, float const* alphas, float* out) {
     // TODO: Optimizations
     //      - We can assume that reflector_1 < reflector_2 always
     //      - Since reflectors are adjacent, we can probably save compute
@@ -407,27 +407,28 @@ __device__ void materialize_reflector_pair_async(int reflector_1, int reflector_
         auto i_idx = element_idx / vector_dim;
         auto j_idx = element_idx % vector_dim;
 
-        auto tau_i = taus[i_idx];
-        auto tau_j = taus[j_idx];
+        auto tau_L = taus[reflector_L];
+        auto tau_R = taus[reflector_R];
 
-        auto reflector_1_i = get_reflector_coordinate(reflector_1, i_idx, row_stride_Q, Q);
-        auto reflector_1_j = get_reflector_coordinate(reflector_1, j_idx, row_stride_Q, Q);
-        auto reflector_2_i = get_reflector_coordinate(reflector_2, i_idx, row_stride_Q, Q);
-        auto reflector_2_j = get_reflector_coordinate(reflector_2, j_idx, row_stride_Q, Q);
+        auto reflector_L_i = get_reflector_coordinate(reflector_L, i_idx, row_stride_Q, Q);
+        auto reflector_L_j = get_reflector_coordinate(reflector_L, j_idx, row_stride_Q, Q);
+        auto reflector_R_i = get_reflector_coordinate(reflector_R, i_idx, row_stride_Q, Q);
+        auto reflector_R_j = get_reflector_coordinate(reflector_R, j_idx, row_stride_Q, Q);
 
-        auto alpha_ij = alphas[i_idx * num_householder_vectors + j_idx];
+        // TODO: Probably better to just materialize alpha on the fly
+        auto alpha_LR = alphas[reflector_L * num_householder_vectors + reflector_R];
 
         // Dirac (i.e. identity-matrix component) along diagonal
         auto accumulator = i_idx == j_idx ? 1.0f : 0.0f;
 
-        // reflector_1 term
-        accumulator -= tau_i * reflector_1_i * reflector_1_j;
+        // reflector_L term
+        accumulator -= tau_L * reflector_L_i * reflector_L_j;
 
-        // reflector_2 term
-        accumulator -= tau_j * reflector_2_i * reflector_2_j;
+        // reflector_R term
+        accumulator -= tau_R * reflector_R_i * reflector_R_j;
 
         // cross term
-        accumulator -= tau_i * tau_j * alpha_ij * reflector_1_i * reflector_2_j;
+        accumulator -= tau_L * tau_R * alpha_LR * reflector_L_i * reflector_R_j;
 
         out[i_idx * vector_dim + j_idx] = accumulator;
     }
@@ -437,8 +438,8 @@ template <int tile_size, int threads_per_block>
 __device__ void tile_multiply_accumulate_async(int row_stride_tile_A, int row_stride_tile_B, int row_stride_tile_C, float* tile_A, float* tile_B, float* tile_C) {
     constexpr auto num_warps_in_block = threads_per_block / 32;
     constexpr auto subtiles_per_row = tile_size / 8;
-    auto tidx = threadIdx.x;
-    const auto warp_idx = tidx / 32;
+    const auto warp_idx = threadIdx.x / 32;
+    auto tidx = threadIdx.x % 32;
 
     for (auto subtile_idx = warp_idx; subtile_idx < tile_size * tile_size / (16 * 8); subtile_idx += num_warps_in_block) {
         // Calculate indices of the 16 x 8 subtile of the product AB that we will be responsible for computing here
@@ -516,17 +517,17 @@ __device__ void tile_multiply_accumulate_async(int row_stride_tile_A, int row_st
             c_2 = __uint_as_float(uc_2);
             c_3 = __uint_as_float(uc_3);
             c_4 = __uint_as_float(uc_4);
-
-            int32_t c_1_global_idx = (subtile_i * 16 + (c_1_local_idx / 8)) * row_stride_tile_C + (subtile_j * 8 + c_1_local_idx % 8);
-            int32_t c_2_global_idx = (subtile_i * 16 + (c_2_local_idx / 8)) * row_stride_tile_C + (subtile_j * 8 + c_2_local_idx % 8);
-            int32_t c_3_global_idx = (subtile_i * 16 + (c_3_local_idx / 8)) * row_stride_tile_C + (subtile_j * 8 + c_3_local_idx % 8);
-            int32_t c_4_global_idx = (subtile_i * 16 + (c_4_local_idx / 8)) * row_stride_tile_C + (subtile_j * 8 + c_4_local_idx % 8);
-
-            tile_C[c_1_global_idx] = c_1;
-            tile_C[c_2_global_idx] = c_2;
-            tile_C[c_3_global_idx] = c_3;
-            tile_C[c_4_global_idx] = c_4;
         }
+
+        int32_t c_1_global_idx = (subtile_i * 16 + (c_1_local_idx / 8)) * row_stride_tile_C + (subtile_j * 8 + c_1_local_idx % 8);
+        int32_t c_2_global_idx = (subtile_i * 16 + (c_2_local_idx / 8)) * row_stride_tile_C + (subtile_j * 8 + c_2_local_idx % 8);
+        int32_t c_3_global_idx = (subtile_i * 16 + (c_3_local_idx / 8)) * row_stride_tile_C + (subtile_j * 8 + c_3_local_idx % 8);
+        int32_t c_4_global_idx = (subtile_i * 16 + (c_4_local_idx / 8)) * row_stride_tile_C + (subtile_j * 8 + c_4_local_idx % 8);
+
+        tile_C[c_1_global_idx] = c_1;
+        tile_C[c_2_global_idx] = c_2;
+        tile_C[c_3_global_idx] = c_3;
+        tile_C[c_4_global_idx] = c_4;
     }
 }
 
@@ -561,23 +562,21 @@ __global__ void base_applyQt_singletile_tc(int size_X, int row_stride_X, int row
             result += i_coord_val * j_coord_val;
         }
 
-        alphas[i_idx * tile_size + j_idx] = result;
+        alphas[i_idx * num_householder_vectors + j_idx] = result;
     }
 
     __syncthreads();
 
     // Materialize matrix for first pair of reflectors
-    materialize_reflector_pair_async<threads_per_block, num_householder_vectors, vector_dim>(0, 1, row_stride_Q, taus, Q, alphas, reflector_matrix);
+    materialize_reflector_pair_async<threads_per_block, num_householder_vectors, vector_dim>(1, 0, row_stride_Q, taus, Q, alphas, reflector_matrix);
 
     for (auto pair_idx = 1; pair_idx < tile_size / 2; pair_idx++) {
-        materialize_reflector_pair_async<threads_per_block, num_householder_vectors, vector_dim>(2 * pair_idx, 2 * pair_idx + 1, row_stride_Q, taus, Q, alphas, tile_buffer);
+        materialize_reflector_pair_async<threads_per_block, num_householder_vectors, vector_dim>(2 * pair_idx + 1, 2 * pair_idx, row_stride_Q, taus, Q, alphas, tile_buffer);
         __syncthreads();
-        tile_multiply_accumulate_async<threads_per_block, tile_size>(tile_size, tile_size, tile_size, reflector_matrix, tile_buffer, tile_buffer_backup);
+        tile_multiply_accumulate_async<threads_per_block, tile_size>(tile_size, tile_size, tile_size, tile_buffer, reflector_matrix, tile_buffer_backup);
         swap_pointers(&tile_buffer_backup, &reflector_matrix);
         __syncthreads();
     }
-
-    __syncthreads();
 
     // Perform the actual matmul
     for (auto tile_idx = blockIdx.x; tile_idx < ceil_div(size_X, tile_size); tile_idx += gridDim.x) {
@@ -585,7 +584,7 @@ __global__ void base_applyQt_singletile_tc(int size_X, int row_stride_X, int row
         for (auto element_idx = threadIdx.x; element_idx < tile_size * tile_size; element_idx += threads_per_block) {
             auto i_idx = element_idx / tile_size;
             auto j_idx = element_idx % tile_size;
-            tile_buffer[i_idx * tile_size + j_idx] = X[i_idx * row_stride_X + j_idx];
+            tile_buffer[i_idx * tile_size + j_idx] = X[i_idx * row_stride_X + (tile_idx * tile_size + j_idx)];
         }
         __syncthreads();
 
@@ -597,7 +596,7 @@ __global__ void base_applyQt_singletile_tc(int size_X, int row_stride_X, int row
         for (auto element_idx = threadIdx.x; element_idx < tile_size * tile_size; element_idx += threads_per_block) {
             auto i_idx = element_idx / tile_size;
             auto j_idx = element_idx % tile_size;
-            X[i_idx * row_stride_X + j_idx] = tile_buffer_2[i_idx * tile_size + j_idx];
+            X[i_idx * row_stride_X + (tile_idx * tile_size + j_idx)] = tile_buffer_2[i_idx * tile_size + j_idx];
         }
         __syncthreads();
     }
