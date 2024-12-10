@@ -4,6 +4,7 @@
 *.ptx
 *.cubin
 *.fatbin
+*.bin
 
 benchmark
 src/build/
