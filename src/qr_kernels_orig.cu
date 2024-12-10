@@ -365,7 +365,7 @@ __global__ __launch_bounds__(numthreadsqr2) void calcQR_doubletile( //calculates
     
 }
         
-
+/*
 void launch_tiled_qr(
     int32_t size_i,
     float *a, float *tau) {
@@ -375,18 +375,18 @@ void launch_tiled_qr(
     }
     int nb_blocks= size_i/tilesize;
     for(int iter=0;iter<nb_blocks-1;iter++){
-        //calcQR_singletile<<<1,dim3(numthreadsqr)>>>(size_i,iter,tau,a); 
-        //applyQt_singletile<<<nb_blocks-1-iter,dim3(tilesize)>>>(size_i,size_i,iter,true,tau,a,a); 
+        calcQR_singletile<<<1,dim3(numthreadsqr)>>>(size_i,iter,tau,a); 
+        applyQt_singletile<<<nb_blocks-1-iter,dim3(tilesize)>>>(size_i,size_i,iter,true,tau,a,a); 
         for (int row=1;row+iter<nb_blocks;row++){
             calcQR_doubletile<<<1,dim3(numthreadsqr2)>>>(size_i,iter,row,tau,a);
-            //applyQt_doubletile<<<nb_blocks-1-iter,dim3(tilesize)>>>(size_i,size_i,iter,row,true,tau,a,a); 
+            applyQt_doubletile<<<nb_blocks-1-iter,dim3(tilesize)>>>(size_i,size_i,iter,row,true,tau,a,a); 
         }
     }
-    //calcQR_singletile<<<1,dim3(numthreadsqr)>>>(size_i,nb_blocks-1,tau,a); 
+    calcQR_singletile<<<1,dim3(numthreadsqr)>>>(size_i,nb_blocks-1,tau,a); 
         
-    }
+    }*/
 
-/*
+
     void launch_tiled_qr(
         int32_t size_i,
         float *a, float *tau) {
@@ -398,28 +398,28 @@ void launch_tiled_qr(
         cudaStreamCreate ( &stream1);
         cudaStreamCreate ( &stream2);
         int nb_blocks= size_i/tilesize;
-        calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,0,tau,a); 
+        calcQR_singletile<<<1,dim3(tilesize)>>>(size_i,0,tau,a); 
         cudaDeviceSynchronize ();
         for(int iter=0;iter<nb_blocks-1;iter++){
-            calcQR_doubletile<<<1,dim3(tilesize,tilesize),0,stream1>>>(size_i,iter,1,tau,a);
-            applyQt_singletile<<<nb_blocks-1-iter,dim3(tilesize,numthreads),0,stream2>>>(size_i,size_i,iter,true,tau,a,a); 
+            calcQR_doubletile<<<1,dim3(numthreadsqr),0,stream1>>>(size_i,iter,1,tau,a);
+            applyQt_singletile<<<nb_blocks-1-iter,dim3(tilesize),0,stream2>>>(size_i,size_i,iter,true,tau,a,a); 
             cudaDeviceSynchronize ();
             for (int row=1;row+iter<nb_blocks;row++){
                 if (row+iter<nb_blocks-1){
-                    calcQR_doubletile<<<1,dim3(tilesize,tilesize),0,stream1>>>(size_i,iter,row+1,tau,a);
+                    calcQR_doubletile<<<1,dim3(numthreadsqr2),0,stream1>>>(size_i,iter,row+1,tau,a);
                 }else if (iter<nb_blocks-2){
-                    calcQR_singletile<<<1,dim3(tilesize,tilesize),0,stream1>>>(size_i,iter+1,tau,a); 
+                    calcQR_singletile<<<1,dim3(tilesize),0,stream1>>>(size_i,iter+1,tau,a); 
                 }
-                applyQt_doubletile<<<nb_blocks-1-iter,dim3(tilesize,numthreads),0,stream2>>>(size_i,size_i,iter,row,true,tau,a,a); 
+                applyQt_doubletile<<<nb_blocks-1-iter,dim3(tilesize),0,stream2>>>(size_i,size_i,iter,row,true,tau,a,a); 
                 cudaDeviceSynchronize ();
             }
         }
         cudaStreamDestroy( stream1);
         cudaStreamDestroy(stream2);
         if (nb_blocks>1){
-            calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,nb_blocks-1,tau,a);
+            calcQR_singletile<<<1,dim3(numthreadsqr)>>>(size_i,nb_blocks-1,tau,a);
         }
-        }*/
+        }
 
 
     void launch_mult_qt(
@@ -483,7 +483,7 @@ void launch_tiled_qr(
 
 
 ////////////////////////////////////////////////////////////////////////////////
-
+/*
 namespace qr_base {
     
     
@@ -811,7 +811,7 @@ void launch_tiled_qr(
             if (nb_blocks>1){
                 base_calcQR_singletile<<<1,dim3(tilesize,tilesize)>>>(size_i,nb_blocks-1,tau,a);
             }
-            }*/
+            }*//*
     
     
         void launch_mult_qt(
@@ -873,7 +873,7 @@ void launch_tiled_qr(
             
     
     
-    };
+    };*/
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1133,7 +1133,7 @@ BenchmarkResults run_all_configs(
 }
 
 
-
+/*
 struct QRbase {
     constexpr static char const *name = "qr_base";
 
@@ -1178,7 +1178,7 @@ struct QRbase {
     }
 
 
-};
+};*/
 
 
 
@@ -1232,7 +1232,7 @@ std::vector<BenchmarkResults> run_all_impls(
     TestData const &data,
     std::vector<BenchmarkConfig> const &configs) {
     auto results = std::vector<BenchmarkResults>{};
-    results.push_back(run_all_configs<QRbase>(phase, data, configs));
+    //results.push_back(run_all_configs<QRbase>(phase, data, configs));
     results.push_back(run_all_configs<QRimproved>(phase, data, configs));
 
     return results;
