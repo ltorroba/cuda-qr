@@ -672,7 +672,11 @@ void launch_base_applyQt_singletile_tc(int size_in, int diag_iter, float const *
     auto taus = &tau[diag_iter * size_in];
 
     auto num_blocks = ceil_div(size_X, 8 * tilesize);
-    auto const threads_per_block = 32;
+    if (num_blocks > 64) {
+        num_blocks = 64;
+    }
+
+    auto const threads_per_block = 128;
     base_applyQt_singletile_tc<tilesize, threads_per_block><<<num_blocks, threads_per_block>>>(size_X, row_stride_X, row_stride_Q, taus, Q, X);
 }
 
