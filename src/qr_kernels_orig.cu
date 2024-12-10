@@ -365,7 +365,7 @@ __global__ __launch_bounds__(numthreadsqr2) void calcQR_doubletile( //calculates
     
 }
         
-/*
+
 void launch_tiled_qr(
     int32_t size_i,
     float *a, float *tau) {
@@ -384,9 +384,9 @@ void launch_tiled_qr(
     }
     calcQR_singletile<<<1,dim3(numthreadsqr)>>>(size_i,nb_blocks-1,tau,a); 
         
-    }*/
+    }
 
-
+/*
     void launch_tiled_qr(
         int32_t size_i,
         float *a, float *tau) {
@@ -419,7 +419,7 @@ void launch_tiled_qr(
         if (nb_blocks>1){
             calcQR_singletile<<<1,dim3(numthreadsqr)>>>(size_i,nb_blocks-1,tau,a);
         }
-        }
+        }*/
 
 
     void launch_mult_qt(
