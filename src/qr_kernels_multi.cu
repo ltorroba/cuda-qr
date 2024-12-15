@@ -83,7 +83,7 @@ void print_matrix(int32_t n_row, int32_t n_col, std::vector<float> const &matrix
     for (int32_t i = 0; i < n_row; i++) {
         printf("    ");
         for (int32_t j = 0; j < n_col; j++) {
-            printf("%8.3f ", matrix.at(i * n_col + j));
+            printf("%8.2f ", matrix.at(i * n_col + j));
         }
         printf("\n");
     }
@@ -96,15 +96,15 @@ void print_matrix(int32_t n_row, int32_t n_col, std::vector<float> const &matrix
 
 namespace qr_multi {
 
-    #define microtilesize 2
-    #define nummicrotiles 2 
-    #define tilesize 4 //required eauql to microtilesize*nummicrotiles
-    #define numthreadsqr 2 // microtilesize/numthreadsqr=ilp for qr1 tile
-    #define numthreadsqr2 2 // microtilesize/numthreadsqr2=ilp for qr2 tile
+    #define microtilesize 64
+    #define nummicrotiles 2
+    #define tilesize 128 //required eauql to microtilesize*nummicrotiles
+    #define numthreadsqr 32 // microtilesize/numthreadsqr=ilp for qr1 tile
+    #define numthreadsqr2 32 // microtilesize/numthreadsqr2=ilp for qr2 tile
     #define nummicroblocksqr 2 //number of microblocks of numthreadsqr launched, >=2
     #define nummicroblocksqr2 2 //number of microblocks of numthreadsqr2 launched, >=2
-    #define numthreadsmul 1  //number of threads sharing a block, needs to be lower than or multiple of microtilesize
-    #define numilpmul 1 //number of columns each thread processes
+    #define numthreadsmul 16  //number of threads sharing a block, needs to be lower than microtilesize
+    #define numilpmul 4 // required to be =microtilesize/numthreadsmul
     
     
 
@@ -114,7 +114,7 @@ namespace qr_multi {
     
 
     
-    __global__ void multi_applyQt_singletile( //aplies Qt (given by householder reflectors on diagonal tile k) to the remainder of the row
+    __global__ __launch_bounds__(numthreadsmul) void multi_applyQt_singletile( //aplies Qt (given by householder reflectors on diagonal tile k) to the remainder of the row
         int size_in,
         int size_out,
         int diag_iter,
@@ -123,20 +123,98 @@ namespace qr_multi {
         float *in, float *out) {
         int g = blockIdx.x;
         int i = threadIdx.x;
-        float outs[microtilesize];
+        float outs[2*microtilesize][numilpmul];
         __shared__ float Qs[microtilesize];
-        int diagstartidx=diag_iter*microtilesize;
-        int tileoffset=(g)*microtilesize;
+        int diagstartidx=diag_iter*microtilesize*nummicrotiles;
+        int groupoffset=(g)*numilpmul*numthreadsmul;
         if (offsetdiag){
-            tileoffset+=diagstartidx+microtilesize;
+            groupoffset+=diagstartidx+microtilesize*nummicrotiles;
+        }
+        
+        for (int microiter=0; microiter<nummicrotiles; microiter++){
+            int microdiagoffset=microiter*microtilesize;
+            //printf("microiter, size %d\n",size_in);
+            for (int microrow=0;microrow+microiter<nummicrotiles ;microrow++){
+                int microrowoffset=microrow*microtilesize;
+                int tileoffset= (microrow==0 ? 0 : 1)*microtilesize;
+                __syncthreads();
+                for (int k=0; k<microtilesize;k++){
+                    for (int j=i; j<numthreadsmul*numilpmul; j+=numthreadsmul){
+                        outs[k+tileoffset][j/numthreadsmul]=out[(k+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+groupoffset];
+                        //printf("idx %d %d %d in block %d loading %d %6.02f and %6.05f from %6.02f\n",i,j,k,g,j/numthreadsmul, outs[k+tileoffset][0], outs[k+tileoffset][1], out[(k+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+groupoffset]);
+                    }
+
+                }
+                
+                //printf("after load in block %d values %6.02f %6.02f idx1 %6.02f %6.02f \n",g, outs[0+tileoffset][0], outs[1+tileoffset][0], outs[0+tileoffset][1], outs[1+tileoffset][1]);
+                    
+                __syncthreads();
+                for(int iter=0;iter<microtilesize-(microrow==0);iter++){
+                    int startidxk=(microrow==0 ? iter+1 : 0);
+                    //printf("befor Q in block %d values %6.02f %6.02f \n",g, outs[0+tileoffset][0], outs[1+tileoffset][0]);
+                    for (int j=startidxk+i;j<microtilesize;j+=numthreadsmul){
+                        Qs[j]=in[(j+diagstartidx+microdiagoffset+microrowoffset)*size_in+iter+diagstartidx+microdiagoffset];
+                        //printf("Qin idx %d in block %d val %6.02f \n",j,g,Qs[j]);
+                    }
+                    //printf("after Q in block %d values %6.02f %6.02f \n",g, outs[0+tileoffset][0], outs[1+tileoffset][0]);
+                    __syncthreads();
+                    for (int j=i; j<numthreadsmul*numilpmul; j+=numthreadsmul){
+                        float tmp_sum=0.0f;
+                        //printf("beginning of loop in block %d %d values %6.02f %6.02f \n",j,g, outs[0+tileoffset][j/numthreadsmul], outs[1+tileoffset][j/numthreadsmul]);
+                        
+                        for (int k=startidxk;k<microtilesize;k++){
+                            tmp_sum+=Qs[k]*outs[k+tileoffset][j/numthreadsmul];
+                            //printf("idx %d %d %d adding to tnmpsum %f %f\n",k,j,g,Qs[k],outs[k+tileoffset][j/numthreadsmul]);
+                        }
+                        //printf("tmpsum idx %d in block %d %6.02f value %6.02f tau %6.02f idx %d \n",j,g,tmp_sum,outs[iter][j/numthreadsmul], tau[(diag_iter*nummicrotiles+microiter)*size_in+microtilesize*microrow+iter] , (diag_iter*nummicrotiles+microiter)*size_in+microtilesize*microrow+iter);
+                        tmp_sum+=outs[iter][j/numthreadsmul];
+                        tmp_sum*=tau[(diag_iter*nummicrotiles)*size_in+microiter*nummicrotiles*microtilesize+microtilesize*microrow+iter];
+                        //printf(" iter %d microiter %d microrow %d taut %6.02f atd idx %d \n",diag_iter, microiter, microrow, tau[(diag_iter*nummicrotiles)*size_in+microiter*nummicrotiles*microtilesize+microtilesize*microrow+iter], (diag_iter*nummicrotiles)*size_in+microiter*nummicrotiles*microtilesize+microtilesize*microrow+iter);
+                        //printf("tmps2m idx %d in block %d %6.02f tau %6.02f\n",j,g,tmp_sum, tau[(diag_iter*microtilesize+microiter)*size_in+microtilesize*microrow+iter]);
+            
+                        for (int k=startidxk;k<microtilesize;k++){
+                            outs[k+tileoffset][j/numthreadsmul]-=Qs[k]* tmp_sum;
+                            //printf("idx %d %d removing %6.02f %6.02f %6.02f \n",j,g,Qs[k],tmp_sum,Qs[k]* tmp_sum);
+                        }
+                        outs[iter][j/numthreadsmul]-=tmp_sum;
+                        //printf("end of loop in block %d %d values %6.02f %6.02f top %6.02f %6.02f  \n",j,g, outs[0+tileoffset][j/numthreadsmul], outs[1+tileoffset][j/numthreadsmul], outs[0][j/numthreadsmul], outs[1][j/numthreadsmul]);
+                    } 
+                
+                
+                    __syncthreads();
+                }
+                if (microrow!=0){
+                    for (int k=0; k<microtilesize;k++){
+                        for (int j=i; j<numthreadsmul*numilpmul; j+=numthreadsmul){
+                            out[(k+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+groupoffset]=outs[k+microtilesize][j/numthreadsmul];
+                            //printf("1 writing back idx %d %d in block %d value %6.02f at idx %d \n",j,k,g,outs[k+microtilesize][j/numthreadsmul], (k+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+groupoffset);
+                        }
+                    }
+                    
+                }
+                __syncthreads();
+            }
+
+            
+            for (int k=0; k<microtilesize;k++){
+                for (int j=i; j<numthreadsmul*numilpmul; j+=numthreadsmul){
+                    out[(k+diagstartidx+microdiagoffset)*size_in+j+groupoffset]=outs[k][j/numthreadsmul];
+                    //printf("2 writing back idx %d %d in block %d val %6.02f at idx %d\n",j,k,g,outs[k][j/numthreadsmul],(k+diagstartidx+microdiagoffset)*size_in+j+groupoffset);
+                }
+            }  
+            
         }
         
         
-        for (int l=0;l<microtilesize;l++){
-            outs[l]=out[(l+diagstartidx)*size_out+i+tileoffset];
-        }
         
-    
+            
+           
+
+
+        
+        
+        
+        /*
         __syncthreads();
     
         for (int k=0;k<microtilesize-1;k++){
@@ -157,11 +235,11 @@ namespace qr_multi {
     
         for (int l=0;l<microtilesize;l++){
             out[(l+diagstartidx)*size_out+i+tileoffset]=outs[l];
-        }
+        }*/
     
     }
     
-    __global__ void multi_applyQt_doubletile( //aplies Qt (given by householder reflectors on the tile at row_idx below diag_idx) to the remainder of the row, and to the row of diag_idx
+    __global__ __launch_bounds__(numthreadsmul) void multi_applyQt_doubletile( //aplies Qt (given by householder reflectors on the tile at row_idx below diag_idx) to the remainder of the row, and to the row of diag_idx
         int size_in,
         int size_out,
         int diag_iter,
@@ -171,15 +249,90 @@ namespace qr_multi {
         float *in, float *out) {
         int g = blockIdx.x;
         int i = threadIdx.x;
-        float outs[2*microtilesize];
+        float outs[2*microtilesize][numilpmul];
         __shared__ float Qs[microtilesize];
-        int diagstartidx=diag_iter*microtilesize;
-        int tileoffset=(g)*microtilesize;
-        int iteroffset=row_iter*microtilesize;
+        int diagstartidx=diag_iter*microtilesize*nummicrotiles;
+        int groupoffset=(g)*numthreadsmul*numilpmul;
+        int iteroffset=row_iter*microtilesize*nummicrotiles;
         if (offsetdiag){
-            tileoffset+=diagstartidx+microtilesize;
+            groupoffset+=diagstartidx+microtilesize*nummicrotiles;
         }
     
+        for (int microiter=0; microiter<nummicrotiles; microiter++){
+            //printf("iter");
+            int microdiagoffset=microiter*microtilesize;
+
+            for (int k=0; k<microtilesize;k++){
+                for (int j=i; j<numthreadsmul*numilpmul; j+=numthreadsmul){
+                    outs[k][j/numthreadsmul]=out[(k+diagstartidx+microdiagoffset)*size_in+j+groupoffset];
+                    //printf("top- idx %d %d in block %d loading %6.02f\n",j,k,g,outs[k][j/numthreadsmul]);
+                }
+            }
+
+            for (int microrow=0;microrow<nummicrotiles;microrow++){
+                
+                int microrowoffset=microrow*microtilesize;
+                int tileoffset= microtilesize;
+                __syncthreads();
+                for (int k=0; k<microtilesize;k++){
+                    for (int j=i; j<numthreadsmul*numilpmul; j+=numthreadsmul){
+                        outs[k+tileoffset][j/numthreadsmul]=out[(k+diagstartidx+microrowoffset+iteroffset)*size_in+j+groupoffset];
+                        //printf("2- idx %d %d in block %d loading %6.02f\n",j,k,g,outs[k+tileoffset][j/numthreadsmul]);
+                    }
+                }
+                
+                
+                __syncthreads();
+                for(int iter=0;iter<microtilesize;iter++){
+                    int startidxk=0;
+                    for (int j=startidxk+i;j<microtilesize;j+=numthreadsmul){
+                        Qs[j]=in[(j+diagstartidx+microrowoffset+iteroffset)*size_in+iter+diagstartidx+microdiagoffset];
+                        //printf("Qin- idx %d %d in block %d loading %6.02f\n",j,iter,g,Qs[j]);
+
+                    }
+                    
+                    __syncthreads();
+                    for (int j=i; j<numthreadsmul*numilpmul; j+=numthreadsmul){
+                        float tmp_sum=0.0f;
+                        
+                        for (int k=startidxk;k<microtilesize;k++){
+                            tmp_sum+=Qs[k]*outs[k+tileoffset][j/numthreadsmul];
+                        }
+                        tmp_sum+=outs[iter][j/numthreadsmul];
+                        tmp_sum*=tau[(diag_iter*nummicrotiles)*size_in+iteroffset*nummicrotiles+microiter*microtilesize*nummicrotiles+microtilesize*microrow+iter];
+                        //printf(" iter %d row %d microiter %d microrow %d taut %6.02f atd idx %d \n",diag_iter, row_iter, microiter, microrow, tau[(diag_iter*nummicrotiles)*size_in+iteroffset*nummicrotiles+microiter*microtilesize*nummicrotiles+microtilesize*microrow+iter], (diag_iter*nummicrotiles)*size_in+iteroffset*nummicrotiles+microiter*microtilesize*nummicrotiles+microtilesize*microrow+iter);
+                        for (int k=startidxk;k<microtilesize;k++){
+                            outs[k+tileoffset][j/numthreadsmul]-=Qs[k]* tmp_sum;
+                        }
+                        outs[iter][j/numthreadsmul]-=tmp_sum;
+                        
+                    } 
+                
+                
+                    __syncthreads();
+                }
+                
+                for (int k=0; k<microtilesize;k++){
+                    for (int j=i; j<numthreadsmul*numilpmul; j+=numthreadsmul){
+                        out[(k+diagstartidx+microrowoffset+iteroffset)*size_in+j+groupoffset]=outs[k+microtilesize][j/numthreadsmul];
+                        //printf(" out 2- idx %d %d in block %d loading %6.02f\n",j,k,g,outs[k+tileoffset][j/numthreadsmul]);
+                    }
+                }
+                    
+                
+                __syncthreads();
+            }
+
+            
+            for (int k=0; k<microtilesize;k++){
+                for (int j=i; j<numthreadsmul*numilpmul; j+=numthreadsmul){
+                    out[(k+diagstartidx+microdiagoffset)*size_in+j+groupoffset]=outs[k][j/numthreadsmul];
+                    //printf("out top - idx %d %d in block %d loading %6.02f\n",j,k,g,outs[k][j/numthreadsmul]);
+                }
+            }  
+            
+        }
+        /*
         for (int l=0;l<microtilesize;l++){
             outs[l]=out[(l+diagstartidx)*size_out+i+tileoffset];
             outs[l+microtilesize]=out[(l+diagstartidx+iteroffset)*size_out+i+tileoffset];
@@ -208,7 +361,7 @@ namespace qr_multi {
         for (int l=0;l<microtilesize;l++){
             out[(l+diagstartidx)*size_out+i+tileoffset]=outs[l];
             out[(l+diagstartidx+iteroffset)*size_out+i+tileoffset]=outs[l+microtilesize];
-        }
+        }*/
     
     }
     //-------------------- calculate QR kernels-----------------------------------
@@ -229,8 +382,7 @@ namespace qr_multi {
         int diagstartidx=diag_iter*microtilesize*nummicrotiles;
 
         
-        
-        __syncthreads();
+    
 
         for (int microiter=0; microiter<nummicrotiles; microiter++){
             int microdiagoffset=microiter*microtilesize;
@@ -243,14 +395,14 @@ namespace qr_multi {
                 for (int k=0; k<microtilesize;k++){
                         for (int j=i; j<microtilesize; j+=numthreadsqr){
                             outs[k+(microrow!=0)*microtilesize][j/numthreadsqr]=out[(k+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+diagstartidx+microdiagoffset];
-                            //printf("idx %d %d in block %d loading %d %6.02f\n",j,k,i2,(k+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+diagstartidx+microdiagoffset,outs[k+(microrow!=0)*microtilesize][j/numthreadsqr]);
+                            //printf("1- idx %d %d in block %d loading %d %6.02f\n",j,k,i2,(k+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+diagstartidx+microdiagoffset,outs[k+(microrow!=0)*microtilesize][j/numthreadsqr]);
                         }
                     }  
                 }else{
                     for (int k=0; k<microtilesize;k++){
                         for (int j=(1+microiter)*microtilesize+i, l=0; j<microtilesize*nummicrotiles; j+=numthreadsqr*(nummicroblocksqr-1), l++){
-                            outs[k+(microrow!=0)*microtilesize][l]=out[(k+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+diagstartidx+microdiagoffset];
-                            //printf("idx %d %d in block %d loading %d %6.02f\n",j,k,i2,(k+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+diagstartidx+microdiagoffset,outs[k+(microrow!=0)*microtilesize][l]);
+                            outs[k+(microrow!=0)*microtilesize][l]=out[(k+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+diagstartidx];
+                            //printf("2- idx %d %d in block %d loading %d %6.02f\n",j,k,i2,(k+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+diagstartidx+microdiagoffset,outs[k+(microrow!=0)*microtilesize][l]);
                         }
                     }
                 }
@@ -258,7 +410,7 @@ namespace qr_multi {
                 __syncthreads();
                 for(int iter=0;iter<microtilesize-(microrow==0);iter++){
                     int startidxk=(microrow==0 ? iter+1 : 0);
-                    float tmp_sum[microtilesize/numthreadsqr]={0.0f};
+                    float tmp_sum[nummicrotiles*microtilesize/(numthreadsqr*nummicroblocksqr)+1]={0.0f};
                     if (i==(iter%numthreadsqr) && i2==0){
                         for (int k= startidxk;k<microtilesize;k++){
                             cache[k]=outs[k+tileoffset][iter/numthreadsqr];
@@ -281,8 +433,8 @@ namespace qr_multi {
                                     }
                                     
                                 }else {
-                                    tau[(diag_iter*microtilesize+microiter)*size_in+microtilesize*microrow+iter]=taut;
-                                    //printf("taut %f atd idx %d \n",taut, newvalue, cache2[0], cache2[1]);
+                                    tau[(diag_iter*nummicrotiles)*size_in+microiter*nummicrotiles*microtilesize+microtilesize*microrow+iter]=taut;
+                                    //printf(" iter %d microiter %d microrow %d taut %6.02f atd idx %d \n",diag_iter, microiter, microrow, taut, (diag_iter*nummicrotiles)*size_in+microiter*nummicrotiles*microtilesize+microtilesize*microrow+iter);
                                 }
                                 tmp_sum[j/numthreadsqr]/= newvalue;
                                 float tmp_sum2 = (tmp_sum[j/numthreadsqr] +outs[iter][j/numthreadsqr])*taut;
@@ -335,7 +487,7 @@ namespace qr_multi {
                 }else{
                     for (int k=0; k<microtilesize;k++){
                         for (int j=(1+microiter)*microtilesize+i, l=0; j<microtilesize*nummicrotiles; j+=numthreadsqr*(nummicroblocksqr-1), l++){
-                            out[(k+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+diagstartidx+microdiagoffset]=outs[k+(microrow!=0)*microtilesize][l];
+                            out[(k+diagstartidx+microdiagoffset+microrowoffset)*size_in+j+diagstartidx]=outs[k+(microrow!=0)*microtilesize][l];
                             //printf("1 writing back idx %d %d in block %d loading %6.02f\n",j,k,i2,outs[k+(microrow!=0)*microtilesize][l]);
                         }
                     }
@@ -354,7 +506,7 @@ namespace qr_multi {
             }else{
             for (int k=0; k<microtilesize;k++){
                 for (int j=(1+microiter)*microtilesize+i, l=0; j<microtilesize*nummicrotiles; j+=numthreadsqr*(nummicroblocksqr-1), l++){
-                    out[(k+diagstartidx+microdiagoffset)*size_in+j+diagstartidx+microdiagoffset]=outs[k][l];
+                    out[(k+diagstartidx+microdiagoffset)*size_in+j+diagstartidx]=outs[k][l];
                     //printf("1 writing back idx %d %d in block %d loading %d %6.02f\n",j,k,i2,(k+diagstartidx+microdiagoffset)*size_in+j+diagstartidx+microdiagoffset, outs[k][l]);
                 }
             } 
@@ -384,29 +536,26 @@ namespace qr_multi {
     
            
         
-        __syncthreads();
 
-        for (int microiter=0; microiter<nummicrotiles; microiter++){
+        for (int microiter=0; microiter<nummicrotiles; microiter++){//nummicrotiles
             int microdiagoffset=microiter*microtilesize;
-
             if (i2==0){
             for (int k=0; k<microtilesize;k++){
                     for (int j=i; j<microtilesize; j+=numthreadsqr2){
                         outs[k][j/numthreadsqr2]=out[(k+diagstartidx+microdiagoffset)*size_in+j+diagstartidx+microdiagoffset];
-                        //printf("top idx %d %d in block %d loading %d %6.02f\n",j,k,i2,(k+diagstartidx+microdiagoffset)*size_in+j+diagstartidx+microdiagoffset,outs[k][j/numthreadsqr]);
+                        //printf("top idx %d %d in block %d loading %6.02f idx %d \n",j,k,i2,outs[k][j/numthreadsqr],(k+diagstartidx+microdiagoffset)*size_in+j+diagstartidx+microdiagoffset);
                     }
                 }  
             }else{
                 for (int k=0; k<microtilesize;k++){
                     for (int j=(1+microiter)*microtilesize+i, l=0; j<microtilesize*nummicrotiles; j+=numthreadsqr2*(nummicroblocksqr2-1), l++){
-                        outs[k][l]=out[(k+diagstartidx+microdiagoffset)*size_in+j+diagstartidx+microdiagoffset];
-                        //printf(" top idx %d %d in block %d loading %6.02f\n",j,k,i2,outs[k][l]);
+                        outs[k][l]=out[(k+diagstartidx+microdiagoffset)*size_in+j+diagstartidx];
+                        //printf(" top idx %d %d in block %d loading %6.02f idx %d \n",j,k,i2,outs[k][l], (k+diagstartidx+microdiagoffset)*size_in+j+diagstartidx);
                     }
                 }
             }            
 
-
-            for (int microrow=0;microrow<nummicrotiles;microrow++){
+            for (int microrow=0;microrow<nummicrotiles;microrow++){//nummicrotiles
                 
                 int microrowoffset=microrow*microtilesize;
                 int tileoffset= microtilesize;
@@ -415,14 +564,14 @@ namespace qr_multi {
                 for (int k=0; k<microtilesize;k++){
                         for (int j=i; j<microtilesize; j+=numthreadsqr2){
                             outs[k+microtilesize][j/numthreadsqr2]=out[(k+diagstartidx+microrowoffset+iteroffset)*size_in+j+diagstartidx+microdiagoffset];
-                            //printf("tile idx %d %d in block %d loading %d %6.02f\n",j,k,i2,(k+diagstartidx+microdiagoffset+microrowoffset+iteroffset)*size_in+j+diagstartidx+microdiagoffset,outs[k+microtilesize][j/numthreadsqr]);
+                            //printf("1 tile idx %d %d in block %d loading %6.02f idx %d \n",j,k,i2,outs[k+microtilesize][j/numthreadsqr], (k+diagstartidx+microrowoffset+iteroffset)*size_in+j+diagstartidx+microdiagoffset);
                         }
                     }  
                 }else{
                     for (int k=0; k<microtilesize;k++){
                         for (int j=(1+microiter)*microtilesize+i, l=0; j<microtilesize*nummicrotiles; j+=numthreadsqr2*(nummicroblocksqr2-1), l++){
-                            outs[k+microtilesize][l]=out[(k+diagstartidx+microrowoffset+iteroffset)*size_in+j+diagstartidx+microdiagoffset];
-                            //printf(" tile idx %d %d in block %d loading  %6.02f\n",j,k,i2,outs[k+microtilesize][l]);
+                            outs[k+microtilesize][l]=out[(k+diagstartidx+microrowoffset+iteroffset)*size_in+j+diagstartidx];
+                            //printf("2 tile idx %d %d in block %d loading  %6.02f idx %d\n",j,k,i2,outs[k+microtilesize][l], (k+diagstartidx+microrowoffset+iteroffset)*size_in+j+diagstartidx);
                         }
                     }
                 }
@@ -430,7 +579,7 @@ namespace qr_multi {
                 __syncthreads();
                 for(int iter=0;iter<microtilesize;iter++){
                     int startidxk= 0;
-                    float tmp_sum[microtilesize/numthreadsqr]={0.0f};
+                    float tmp_sum[nummicrotiles*microtilesize/(numthreadsqr*nummicroblocksqr)+1]={0.0f};
                     if (i==(iter%numthreadsqr2) && i2==0){
                         for (int k= startidxk;k<microtilesize;k++){
                             cache[k]=outs[k+tileoffset][iter/numthreadsqr2];
@@ -453,7 +602,8 @@ namespace qr_multi {
                                     }
                                     
                                 }else {
-                                    tau[(diag_iter*nummicrotiles+microiter)*size_in+iteroffset+microtilesize*microrow+j]=taut;
+                                    tau[(diag_iter*nummicrotiles)*size_in+iteroffset*nummicrotiles+microiter*microtilesize*nummicrotiles+microtilesize*microrow+iter]=taut;
+                                    //printf(" iter %d row %d microiter %d microrow %d taut %6.02f atd idx %d \n",diag_iter, row_iter, microiter, microrow, taut, (diag_iter*nummicrotiles)*size_in+iteroffset*nummicrotiles+microiter*microtilesize*nummicrotiles+microtilesize*microrow+iter);
                                     //printf("taut %f newvalue %f caches %f %f \n",taut, newvalue, cache2[0], cache2[1]);
                                 }
                                 tmp_sum[j/numthreadsqr2]/= newvalue;
@@ -498,15 +648,15 @@ namespace qr_multi {
                     for (int k=0; k<microtilesize;k++){
                         for (int j=i; j<microtilesize; j+=numthreadsqr2){
                             out[(k+diagstartidx+microrowoffset+iteroffset)*size_in+j+diagstartidx+microdiagoffset]=outs[k+microtilesize][j/numthreadsqr2];
-                            //printf(" 3 writing back idx %d %d in block %d loading %d %6.02f\n",j,k,i2,(k+diagstartidx+microdiagoffset+microrowoffset+iteroffset)*size_in+j+diagstartidx+microdiagoffset,outs[k+microtilesize][j/numthreadsqr]);
+                            //printf(" 3 writing back idx %d %d in block %d loading %6.02f top %6.02f \n",j,k,i2,outs[k+microtilesize][j/numthreadsqr], outs[k][j/numthreadsqr]);
                         }
                     }
                       
                 }else{
                     for (int k=0; k<microtilesize;k++){
                         for (int j=(1+microiter)*microtilesize+i, l=0; j<microtilesize*nummicrotiles; j+=numthreadsqr2*(nummicroblocksqr2-1), l++){
-                            out[(k+diagstartidx+microrowoffset+iteroffset)*size_in+j+diagstartidx+microdiagoffset]=outs[k+microtilesize][l];
-                            //printf("3 writing back idx %d %d in block %d loading %d %6.02f\n",j,k,i2,(k+diagstartidx+microdiagoffset+microrowoffset+iteroffset)*size_in+j+diagstartidx+microdiagoffset,outs[k+microtilesize][l]);
+                            out[(k+diagstartidx+microrowoffset+iteroffset)*size_in+j+diagstartidx]=outs[k+microtilesize][l];
+                            //printf("3 writing back idx %d %d in block %d loading %6.02f \n",j,k,i2,outs[k+microtilesize][l]);
                         }
                     }
                 }
@@ -517,14 +667,14 @@ namespace qr_multi {
                 for (int k=0; k<microtilesize;k++){
                     for (int j=i; j<microtilesize; j+=numthreadsqr2){
                         out[(k+diagstartidx+microdiagoffset)*size_in+j+diagstartidx+microdiagoffset]=outs[k][j/numthreadsqr2];
-                        //printf(" 4 writing back idx %d %d in block %d loading %d %6.02f\n",j,k,i2,(k+diagstartidx+microdiagoffset)*size_in+j+diagstartidx+microdiagoffset,outs[k][j/numthreadsqr]);
+                        //printf(" 4 writing back idx %d %d in block %d value %6.02f\n",j,k,i2,outs[k][j/numthreadsqr]);
                     }
                 }  
             }else{
             for (int k=0; k<microtilesize;k++){
                 for (int j=(1+microiter)*microtilesize+i, l=0; j<microtilesize*nummicrotiles; j+=numthreadsqr2*(nummicroblocksqr2-1), l++){
-                    out[(k+diagstartidx+microdiagoffset)*size_in+j+diagstartidx+microdiagoffset]=outs[k][l];
-                    //printf("4 writing back idx %d %d in block %d loading %d %6.02f\n",j,k,i2,(k+diagstartidx+microdiagoffset)*size_in+j+diagstartidx+microdiagoffset,outs[k][l]);
+                    out[(k+diagstartidx+microdiagoffset)*size_in+j+diagstartidx]=outs[k][l];
+                    //printf("4 writing back idx %d %d in block %d loading  %6.02f\n",j,k,i2,outs[k][l]);
                 }
             } 
                
@@ -551,10 +701,11 @@ namespace qr_multi {
         int nb_blocks= size_i/(microtilesize*nummicrotiles);
         for(int iter=0;iter<nb_blocks-1;iter++){
             multi_calcQR_singletile<<<1,dim3(numthreadsqr, nummicroblocksqr)>>>(size_i,iter,tau,a); 
-            multi_applyQt_singletile<<<nb_blocks-1-iter,dim3(tilesize)>>>(size_i,size_i,iter,true,tau,a,a); 
+            int qtblocks= (size_i-(1+iter)*microtilesize*nummicrotiles+numthreadsmul*numilpmul-1)/(numthreadsmul*numilpmul);
+            multi_applyQt_singletile<<<qtblocks,numthreadsmul>>>(size_i,size_i,iter,true,tau,a,a); 
             for (int row=1;row+iter<nb_blocks;row++){
                 multi_calcQR_doubletile<<<1,dim3(numthreadsqr2, nummicroblocksqr2)>>>(size_i,iter,row,tau,a);
-                multi_applyQt_doubletile<<<nb_blocks-1-iter,dim3(tilesize)>>>(size_i,size_i,iter,row,true,tau,a,a); 
+                multi_applyQt_doubletile<<<qtblocks,numthreadsmul>>>(size_i,size_i,iter,row,true,tau,a,a); 
             }
         }
         multi_calcQR_singletile<<<1,dim3(numthreadsqr)>>>(size_i,nb_blocks-1,tau,a); 
@@ -604,13 +755,12 @@ namespace qr_multi {
             if ( size_k%tilesize !=0 ){
                     throw std::invalid_argument( "Not implemented for this argument size" );
             }
-            int no_blocks=size_k/tilesize;
-            
+            int qtblocks= (size_j+numthreadsmul*numilpmul-1)/(numthreadsmul*numilpmul);
             for(int iter=0;iter<min(size_i,size_j)/tilesize;iter++){
-                multi_applyQt_singletile<<<no_blocks,dim3(tilesize)>>>(size_j,size_k,iter,false,tau,a, b); 
+                multi_applyQt_singletile<<<qtblocks,numthreadsmul>>>(size_j,size_k,iter,false,tau,a, b); 
                 for (int row=1;row+iter<(size_i/tilesize);row++){
     
-                    multi_applyQt_doubletile<<<no_blocks,dim3(tilesize)>>>(size_j,size_k,iter,row,false,tau,a, b); 
+                    multi_applyQt_doubletile<<<qtblocks,numthreadsmul>>>(size_j,size_k,iter,row,false,tau,a, b); 
                 }
             }
                 
@@ -628,9 +778,8 @@ namespace qr_multi {
             int32_t size_i,
             float *a, float *tau) {
                 multi_calcQR_singletile<<<1,dim3(numthreadsqr, nummicroblocksqr)>>>(size_i,0,tau,a); 
-                multi_applyQt_singletile<<<1,dim3(tilesize)>>>(size_i,size_i,0,true,tau,a,a); 
-    
-    
+                int qtblocks= (microtilesize*nummicrotiles-1+numthreadsmul*numilpmul)/(numthreadsmul*numilpmul);
+                multi_applyQt_singletile<<<qtblocks,numthreadsmul>>>(size_i,size_i,0,true,tau,a,a); 
         
             }
         void test_qrkernel_double(
@@ -645,10 +794,11 @@ namespace qr_multi {
         void test_mulqtkernel_double(
             int32_t size_i,
             float *a, float *tau) {
+                int qtblocks= (microtilesize*nummicrotiles-1+numthreadsmul*numilpmul)/(numthreadsmul*numilpmul);
                 multi_calcQR_singletile<<<1,dim3(numthreadsqr, nummicroblocksqr)>>>(size_i,0,tau,a); 
-                multi_applyQt_singletile<<<1,dim3(tilesize)>>>(size_i,size_i,0,true,tau,a,a); 
+                multi_applyQt_singletile<<<qtblocks,numthreadsmul>>>(size_i,size_i,0,true,tau,a,a); 
                 multi_calcQR_doubletile<<<1,dim3(numthreadsqr2, nummicroblocksqr2)>>>(size_i,0,1,tau,a);
-                multi_applyQt_doubletile<<<1,dim3(tilesize)>>>(size_i,size_i,0,1,true,tau,a,a); 
+                multi_applyQt_doubletile<<<qtblocks,numthreadsmul>>>(size_i,size_i,0,1,true,tau,a,a); 
                 multi_calcQR_singletile<<<1,dim3(numthreadsqr, nummicroblocksqr)>>>(size_i,1,tau,a); 
         
             }         
@@ -1511,11 +1661,14 @@ float get_relrmse(int size_i, int size_j, float *valsgpu, std::vector<float> ref
     float rel_rmse = std::sqrt(mse) / std::sqrt(divmse) ;
 
     if (((rel_rmse > 1e-3)  || rel_rmse!=rel_rmse) && size_i<65 && size_j<65 && phase == Phase::TEST) {
-        printf("\n  expected output:\n");
+        /*printf("\n  expected output:\n");
         print_matrix(size_i, size_j, ref);
         printf("\n  obtained output:\n");
-        print_matrix(size_i,  size_j, out_host);
+        print_matrix(size_i,  size_j, out_host);*/
+        printf("incorrect\n");
     } 
+
+    
     return rel_rmse;
 }
 
@@ -1557,9 +1710,12 @@ TestData read_test_data(Phase phase,
                 size_i * size_j);
         }
         
-        printf("\n  input:\n");
+        /*printf("\n  input:\n");
         auto const &adata = data.a.at({size_i, size_j});
         print_matrix(size_i, size_j,adata );
+        printf("\n  input mul:\n");
+        auto const &xdata = data.x.at({size_i, size_j});
+        print_matrix(size_i, size_j,xdata );*/
         
 
     }
@@ -2111,7 +2267,7 @@ int main(int argc, char **argv) {
     }
 
     auto configs_test = std::vector<BenchmarkConfig>{
-        {{tilesize,tilesize}, {tilesize*2,tilesize}}, // {tilesize,2*tilesize}, {tilesize*2,tilesize*2}},// ,{128,128} },
+        {{tilesize,tilesize},{tilesize*2,tilesize},{tilesize,2*tilesize},{tilesize*2,tilesize*2}},// ,{128,128} },
     };
     auto configs = std::vector<BenchmarkConfig>{
         {{tilesize,tilesize},{128,128},{512,512},{1024,1024},{2048,2048},{4096,4096}},
@@ -2121,7 +2277,7 @@ int main(int argc, char **argv) {
     auto data = read_test_data(Phase::TEST, test_data_dir, configs_test);
     get_cublas_results(Phase::WARMUP, data,configs_test);
     run_all_impls(Phase::TEST, data, configs_test);
-    /*
+    
     data = read_test_data(Phase::BENCHMARK, test_data_dir, configs);
     get_cublas_results(Phase::WARMUP, data,configs);
     auto curesults= get_cublas_results(Phase::BENCHMARK, data,configs);
@@ -2133,7 +2289,7 @@ int main(int argc, char **argv) {
     
     for (int32_t j = 0; j < results.size(); ++j) {
             print_speedup(configs, results.at(j),  curesults, curesults_ext);
-    }*/
+    }
 
             
     //write_json_results("out/results.json", results);
