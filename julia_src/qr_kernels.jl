@@ -1,247 +1,232 @@
 using KernelAbstractions.Extras: @unroll
 
+const NUMILPQR = 2
+const TILESIZE =32
+const QRSPLIT =8 
+
+
 @kernel function QR_unsafe_kernel_2d!(input, tau) 
-    i, j = @index(Local, NTuple)
-    N = @uniform @groupsize()[1]
+    i = @index(Local,Linear)
 
-    # +1 to avoid bank conflicts on shared memory
-    tile = @localmem eltype(input) (N + 1, N)
-    cache = @localmem eltype(input) (N + 1)
-    tau_iter = @localmem eltype(input) (1)
-    corrvalue = @localmem eltype(input) (1)
+    tilecol = @private eltype(input) (TILESIZE)
+    cache = @localmem eltype(input) (TILESIZE)
+    tau_iter = @private eltype(input) (1)
+    sharedvalue = @localmem eltype(input) (1)
+    
+    @unroll for j=1:TILESIZE
+        @inbounds tilecol[j] = input[j,i]
+    end
 
-    @inbounds tile[i, j] = input[i, j]
-
-
-    for iter in 1:N-1
-        if (i > iter) && (j == iter)
-            cache[i] = tile[i, iter]^2
+    for iter in 1:TILESIZE-1
+        tmp_sum= zero(eltype(input))
+        if (i==iter)
+            @unroll for j in iter+1:TILESIZE
+                @inbounds cache[j] = tilecol[j]
+                @inbounds tmp_sum+=tilecol[j]*tilecol[j]
+            end
+            @inbounds cache[iter]=tilecol[iter]
+            @inbounds sharedvalue[1]=tmp_sum
         end
         @synchronize
-        if (i == 1) && (j == 1)
-            tmp_sum = zero(eltype(input))
-            for l in iter+1:N
-                tmp_sum += cache[l]
+        if (i>=iter)       
+            if (i>iter)
+                @unroll for j in iter+1:TILESIZE
+                    @inbounds tmp_sum+=cache[j]*tilecol[j]
+                end
             end
-            tmp_sum2 = sqrt(tmp_sum + tile[iter, iter]^2)
-            newvalue = tile[iter, iter] + sign(tile[iter, iter]) * tmp_sum2
-            tmp_sum2 = sqrt(tmp_sum + newvalue^2)
-            tau_iter[1] = 2 * (newvalue / tmp_sum2)^2
-            corrvalue[1] = newvalue
-            tau[iter] = tau_iter[1]
-        end
-        if (j >= iter) && (i >= iter)
-            tmp_sum = zero(eltype(input))
-            for k = iter+1:N
-                tmp_sum += tile[k, iter]  * tile[k, j]
-            end
-        end
-        tileiterj=tile[iter, j]
-        tileiiter = tile[i, iter] 
-        @synchronize
-        if (j >= iter) && (i >= iter)
-            corrvalue1 = corrvalue[1]
-            tmp_sum = (tmp_sum / corrvalue1+ tileiterj)*tau_iter[1] 
-            tileiiter = tileiiter / corrvalue1
-
-            if (j==iter) && (i > iter) 
-                tile[i, j] = tileiiter 
-            elseif (i>iter)
-                tile[i, j] = tile[i, j] - tileiiter* tmp_sum  
+            @inbounds newvalue = cache[iter] + sign(cache[iter]) * sqrt(sharedvalue[1] + cache[iter]*cache[iter])
+            @inbounds taucurrent = 2 / (sharedvalue[1]/(newvalue*newvalue) + 1)
+            @inbounds tmp_sum2 = (tmp_sum/newvalue + tilecol[iter])*taucurrent
+            
+            if (i==iter)
+                @inbounds tau_iter[1]=taucurrent
             else
-                tile[i, j] = tile[i, j] - tmp_sum 
+                @unroll for j in iter+1:TILESIZE
+                    @inbounds tilecol[j]= tilecol[j]*newvalue-cache[j]*tmp_sum2
+                end
             end
+            @unroll for j in iter+1:TILESIZE
+                @inbounds tilecol[j]/=newvalue
+            end
+            @inbounds tilecol[iter]-=tmp_sum2
+
         end
+        @inbounds input[iter,i] = tilecol[iter]
         @synchronize
     end
-    @inbounds input[i, j] = tile[i, j]
+    @inbounds input[TILESIZE,i] = tilecol[TILESIZE]
+    tau[i]=tau_iter[1]
     @synchronize
-
 end
 
 
 @kernel function QR_unsafe_kernel2_2d!(input, input2, tau)
-    i, j = @index(Local, NTuple)
-    N = @uniform @groupsize()[1]
+    i,k = @index(Local, NTuple)
 
-    # +1 to avoid bank conflicts on shared memory
-    tile = @localmem eltype(input) (2N + 1, N)
-    cache = @localmem eltype(input) (2N + 1)
-    tau_iter = @localmem eltype(input) (1)
-    corrvalue = @localmem eltype(input) (1)
+    tilecol = @private eltype(input) (Int(TILESIZE/QRSPLIT))
+    cache = @localmem eltype(input) (TILESIZE)
+    cache2 = @localmem eltype(input) (TILESIZE, QRSPLIT)
+    tau_iter = @private eltype(input) (1)
+    sharedvalue = @localmem eltype(input) (2)
 
-    @inbounds tile[N+i, j] = input2[i, j]
-    @inbounds tile[i, j] = input[i, j]
-    
-    @synchronize
-    for iter in 1:N
-        if (j==iter)
-            cache[i] = tile[i+N, iter]^2
-        end
-        @synchronize
-        if (i == 1) && (j==1)
-            tmp_sum = zero(eltype(input))
-            for l in 1:N
-                tmp_sum += cache[l]
-            end
-            tmp_sum2 = sqrt(tmp_sum + tile[iter, iter]^2)
-            newvalue = tile[iter, iter] + sign(tile[iter,iter]) *tmp_sum2
-            tmp_sum2 = sqrt(tmp_sum + newvalue^2)
-            tau_iter[1] = 2 * (newvalue / tmp_sum2)^2
-            corrvalue[1] = newvalue
-            tau[iter] = tau_iter[1]
-        end
-        tileiNiter= tile[i+N, iter]
-        tileiterj=tile[iter, j]
-        if (j>=iter)
-            tmp_sum = zero(eltype(input))
-            for l = N+1:2N
-                tmp_sum += tile[l, iter] * tile[l, j]
+    @unroll for j in 1:Int(TILESIZE/QRSPLIT)
+        @inbounds tilecol[j] = input2[(j-1)*QRSPLIT+k, i]
+    end
+
+    for iter in 1:TILESIZE
+        tmp_sum = zero(eltype(input))
+        @inbounds tileiter= input[iter, i]
+        if (i==iter)
+            @unroll for j in 1:Int(TILESIZE/QRSPLIT)
+                @inbounds cache[(j-1)*QRSPLIT+k] = tilecol[j]
             end
         end
         @synchronize
-        taucorr=tau_iter[1] / corrvalue[1]
-        corrvalue1 = corrvalue[1]
-        if (j >= iter) 
-            tmp_sum += corrvalue1 * tileiterj
-            if (i==iter)
-                tile[i, j] = tile[i,j] - tmp_sum * taucorr
+
+        if (i>=iter)
+            @unroll for j in 1:Int(TILESIZE/QRSPLIT)
+                @inbounds tmp_sum+=tilecol[j]*cache[(j-1)*QRSPLIT+k]
             end
-            if (j>iter)
-                tile[i+N, j] = tile[i+N, j] - tileiNiter * tmp_sum *taucorr / corrvalue1
+            if (i==iter && k==1)
+                @inbounds sharedvalue[2]=tileiter
             end
+            @inbounds cache2[i,k]=tmp_sum
         end
-        if (j==1)
-            tile[i+N, iter] = tileiNiter / corrvalue1
+        
+        @synchronize
+
+        if (i>=iter)
+            tmpsumiter = zero(eltype(input))
+            tmp_sum = zero(eltype(input))
+            @unroll for j = 1:QRSPLIT
+                @inbounds tmpsumiter+= cache2[iter,j]
+                @inbounds tmp_sum += cache2[i,j]
+            end
+
+            @inbounds newvalue = sharedvalue[2] + sign(sharedvalue[2]) *sqrt(tmpsumiter+ sharedvalue[2]*sharedvalue[2])
+            @inbounds taucurrent = 2 * (tmpsumiter / (newvalue*newvalue)+1)
+            @inbounds tmp_sum2 = (tmp_sum/newvalue + tileiter)*taucurrent
+            if (i==iter && k==1)
+                @inbounds tau_iter[1] = taucurrent
+            else
+                @unroll for j in 1:Int(TILESIZE/QRSPLIT)
+                    @inbounds tilecol[j]*=newvalue
+                    @inbounds tilecol[j]-=cache[(j-1)*QRSPLIT+k]*tmp_sum2
+                end
+            end
+            @unroll for j in 1:Int(TILESIZE/QRSPLIT)
+                @inbounds tilecol[j]/=newvalue
+            end
+            if (k==1)
+                @inbounds input[iter, i]-=tmp_sum2
+            end
         end
         @synchronize
     end
     
-    @inbounds input2[i, j] = tile[N+i, j]
-    @inbounds input[i, j] = tile[i, j]
-    @synchronize
+    @unroll for j in 1:Int(TILESIZE/QRSPLIT)
+        @inbounds input2[(j-1)*QRSPLIT+k, i]=tilecol[j] 
+    end
+    if (k==1)
+        @inbounds tau[i]=tau_iter[1]
+    end
+    
 
 end
 
 @kernel function applyQorQt_unsafe_kernel_2d!(A, @Const(Min), @Const(tau))
-    g, _ = @index(Group, NTuple)
-    i, j = @index(Local, NTuple)
-    N = @uniform @groupsize()[1]
-    K = @uniform @groupsize()[2]
-    tile = @localmem eltype(A) (N + 1, N)
-    M = @localmem eltype(A) (N + 1, N)
-    cache = @localmem eltype(A) (N + 1,K)
+    g = @index(Group, Linear)
+    i = @index(Local, Linear)
+    tilecol = @private eltype(A) (TILESIZE)
+    M = @localmem eltype(A) (TILESIZE)
     
-    @unroll for l in j:K:N
-        @inbounds tile[i, l] = A[i, l+(g-1)*N]
-        @inbounds M[i, l] = Min[i, l]
+    @unroll for l in 1:TILESIZE
+        @inbounds tilecol[l] = A[l, (g-1)*TILESIZE+i]
     end
 
-    applyrange = (1:N-1) 
-    
-    @synchronize
-    for k in applyrange
-        tmp_sum = zero(eltype(A))
-        for l in k+j:K:N
-            tmp_sum += M[l, k] * tile[l, i]
-        end
-        cache[i,j]=tmp_sum
+    for k in 1:TILESIZE-1
+        @inbounds M[i] = Min[i, k]
         @synchronize
-        tmp_sum = tile[k, i] 
-        for l in 1:K
-            tmp_sum+=cache[i,l]
+        tmp_sum = zero(eltype(A))
+        @unroll for l in k+1:TILESIZE
+            @inbounds tmp_sum += M[l] * tilecol[l]
         end
-        tmp_sum = tmp_sum * tau[k]
-        for l in k+j:K:N
-            tile[l, i] = tile[l, i] - tmp_sum * M[l, k]
+        @inbounds tmp_sum+=tilecol[k]
+        @inbounds tmp_sum*=tau[k]
+
+        @unroll for l in k+1:TILESIZE
+            @inbounds tilecol[l] -= tmp_sum * M[l]
         end
-        if (j==1)
-            tile[k, i] = tile[k, i] - tmp_sum
-        end
+        @inbounds tilecol[k]-=tmp_sum
         @synchronize
     end
-    @unroll for l in j:K:N
-        @inbounds A[i, l+(g-1)*N]  = tile[i, l]
+
+    @unroll for l in 1:TILESIZE
+        @inbounds A[l, (g-1)*TILESIZE+i]=tilecol[l]
     end
 end
 
 @kernel function applyQorQt_unsafe_kernel2_2d!(A, B, @Const(Min), @Const(tau))
-    g, _ = @index(Group, NTuple)
-    i, j = @index(Local, NTuple)
-    N = @uniform @groupsize()[1]
-    K = @uniform @groupsize()[2]
-    tile = @localmem eltype(A) (2N + 1, N)
-    M = @localmem eltype(A) (N + 1, N)
-    cache = @localmem eltype(A) (N+1, K)
+    g = @index(Group, Linear)
+    i = @index(Local, Linear)
+    tilecol = @private eltype(A) (TILESIZE)
+    M = @localmem eltype(A) (TILESIZE)
     
-    @unroll for l in j:K:N
-        @inbounds tile[i, l] = A[i, l+(g-1)*N]
-        @inbounds tile[i+N, l] = B[i, l+(g-1)*N]
-        @inbounds M[i, l] = Min[i, l]
+    @unroll for l in 1:TILESIZE
+        @inbounds tilecol[l] = B[l, i+(g-1)*TILESIZE] 
     end
 
-    applyrange =  (1:N) 
-
-    @synchronize
-    for k in applyrange
+    for k in 1:TILESIZE
+        @inbounds M[i] = Min[i, k]
+        @synchronize
         tmp_sum= zero(eltype(A))       
-        for j in j:K:N
-            tmp_sum += M[j, k] * tile[j+N, i]
+        @unroll for j in 1:TILESIZE
+            @inbounds tmp_sum += M[j] * tilecol[j]
         end
-        cache[i,j]=tmp_sum
-        @synchronize
-        tmp_sum = tile[k, i]
-        for l in 1:K
-            tmp_sum+=cache[i,l]
-        end
-        tmp_sum = tmp_sum * tau[k]
-        if (j==1)
-            tile[k, i] = tile[k, i] - tmp_sum
-        end
-        for l in j:K:N
-            tile[l+N, i] = tile[l+N, i] - tmp_sum * M[l, k]
+        @inbounds tmp_sum+= A[k, i+(g-1)*TILESIZE]
+        @inbounds tmp_sum *= tau[k]
+        @inbounds A[k, i+(g-1)*TILESIZE] -= tmp_sum
+
+        @unroll for l in 1:TILESIZE
+            @inbounds tilecol[l] -= tmp_sum * M[l]
         end
         @synchronize
     end
-    @unroll for l in j:K:N
-        @inbounds A[i, l+(g-1)*N] = tile[i, l]
-        @inbounds B[i, l+(g-1)*N] = tile[i+N, l]
+    @unroll for l in 1:TILESIZE
+        @inbounds B[l, i+(g-1)*TILESIZE] = tilecol[l]
     end
 end
 
 
-
-TILE_SIZE=32
-TILE_SIZE2=4
 
 get_tileview(A, row , col, TILE_SIZEx, TILE_SIZEy ) = view(A, (row-1)*TILE_SIZEx.+(1:TILE_SIZEx),(col-1)*TILE_SIZEy.+(1:TILE_SIZEy))
 get_rowview(A, row, startcol, TILE_SIZEx, TILE_SIZEy) =  view(A, (row-1)*TILE_SIZEx .+(1:TILE_SIZEx),((startcol-1)*TILE_SIZEy +1):size(A,2))
 get_kernel_dims(::KernelAbstractions.Kernel{B,S}) where {B,S} = S.parameters[1]
 
-QR1!(A, Tau, k) = QR_unsafe_kernel_2d!(backend, (TILE_SIZE,TILE_SIZE))( get_tileview(A, k,k, TILE_SIZE, TILE_SIZE), 
-                                    get_tileview(Tau, k,k, 1, TILE_SIZE), ndrange=(TILE_SIZE,TILE_SIZE)) 
-QR2!(A, Tau, row, k) =QR_unsafe_kernel2_2d!(backend, (TILE_SIZE,TILE_SIZE))(get_tileview(A, k,k, TILE_SIZE, TILE_SIZE), 
-                                    get_tileview(A, row,k, TILE_SIZE, TILE_SIZE), 
-                                    get_tileview(Tau, row,k, 1, TILE_SIZE), ndrange=(TILE_SIZE,TILE_SIZE))
+QR1!(A, Tau, k) = QR_unsafe_kernel_2d!(backend, (TILESIZE))( get_tileview(A, k,k, TILESIZE, TILESIZE), 
+                                    get_tileview(Tau, k,k, 1, TILESIZE), ndrange=(TILESIZE)) 
+QR2!(A, Tau, row, k) =QR_unsafe_kernel2_2d!(backend, (TILESIZE, QRSPLIT))(get_tileview(A, k,k, TILESIZE, TILESIZE), 
+                                    get_tileview(A, row,k, TILESIZE, TILESIZE), 
+                                    get_tileview(Tau, row,k, 1, TILESIZE), ndrange=(TILESIZE,QRSPLIT))
 
-Qtapply1_par!(A, Tau, k) = applyQorQt_unsafe_kernel_2d!(backend, (TILE_SIZE,TILE_SIZE2))(get_rowview(A, k, k+1, TILE_SIZE, TILE_SIZE), 
-                                    get_tileview(A, k,k, TILE_SIZE, TILE_SIZE), 
-                                    get_tileview(Tau, k,k, 1, TILE_SIZE), ndrange=( size(A,2)-k*TILE_SIZE,TILE_SIZE2) )
-Qtapply2_par!(A, Tau, row,k) = applyQorQt_unsafe_kernel2_2d!(backend, (TILE_SIZE,TILE_SIZE2))(get_rowview(A, k, k+1, TILE_SIZE, TILE_SIZE), 
-                                    get_rowview(A, row, k+1, TILE_SIZE, TILE_SIZE), 
-                                    get_tileview(A, row,k, TILE_SIZE, TILE_SIZE), 
-                                    get_tileview(Tau, row,k, 1, TILE_SIZE), ndrange=( size(A,2)-k*TILE_SIZE,TILE_SIZE2))
+Qtapply1_par!(A, Tau, k) = applyQorQt_unsafe_kernel_2d!(backend, (TILESIZE))(get_rowview(A, k, k+1, TILESIZE, TILESIZE), 
+                                    get_tileview(A, k,k, TILESIZE, TILESIZE), 
+                                    get_tileview(Tau, k,k, 1, TILESIZE), ndrange=( size(A,2)-k*TILESIZE) )
+Qtapply2_par!(A, Tau, row,k) = applyQorQt_unsafe_kernel2_2d!(backend, (TILESIZE))(get_rowview(A, k, k+1, TILESIZE, TILESIZE), 
+                                    get_rowview(A, row, k+1, TILESIZE, TILESIZE), 
+                                    get_tileview(A, row,k, TILESIZE, TILESIZE), 
+                                    get_tileview(Tau, row,k, 1, TILESIZE), ndrange=( size(A,2)-k*TILESIZE))
 
-Qtapply1_par_full!(B, A, Tau, k) = applyQorQt_unsafe_kernel_2d!(backend, (TILE_SIZE,TILE_SIZE2))(view(B, (1:TILE_SIZE).+(k-1)*TILE_SIZE,: ), 
-                                    get_tileview(A, k,k, TILE_SIZE, TILE_SIZE), 
-                                    get_tileview(Tau, k,k, 1, TILE_SIZE), ndrange=( size(B,2),TILE_SIZE2) )
-Qtapply2_par_full!(B, A, Tau, row,k) = applyQorQt_unsafe_kernel2_2d!(backend, (TILE_SIZE,TILE_SIZE2))(view(B, (1:TILE_SIZE).+(k-1)*TILE_SIZE,: ), 
-                                    view(B, (1:TILE_SIZE).+(row-1)*TILE_SIZE,: ), 
-                                    get_tileview(A, row,k, TILE_SIZE, TILE_SIZE), 
-                                    get_tileview(Tau, row,k, 1, TILE_SIZE), ndrange=( size(B,2),TILE_SIZE2))
+Qtapply1_par_full!(B, A, Tau, k) = applyQorQt_unsafe_kernel_2d!(backend, (TILESIZE))(view(B, (1:TILESIZE).+(k-1)*TILESIZE,: ), 
+                                    get_tileview(A, k,k, TILESIZE, TILESIZE), 
+                                    get_tileview(Tau, k,k, 1, TILESIZE), ndrange=( size(B,2)) )
+Qtapply2_par_full!(B, A, Tau, row,k) = applyQorQt_unsafe_kernel2_2d!(backend, (TILESIZE))(view(B, (1:TILESIZE).+(k-1)*TILESIZE,: ), 
+                                    view(B, (1:TILESIZE).+(row-1)*TILESIZE,: ), 
+                                    get_tileview(A, row,k, TILESIZE, TILESIZE), 
+                                    get_tileview(Tau, row,k, 1, TILESIZE), ndrange=( size(B,2)))
 
 #Threads.@spawn begin, CUDA.@sync begin
-    
+ #=   
 function mygeqrf!(A, Tau, nbtiles)
     QR1!(A,Tau, 1)
     for k in 1:(nbtiles-1)
@@ -265,6 +250,7 @@ function mygeqrf!(A, Tau, nbtiles)
     end
     return A
 end
+=#
 
 
 function myormqr!(B, A, Tau, nbtiles)
@@ -277,7 +263,7 @@ function myormqr!(B, A, Tau, nbtiles)
     return B
 end
 
-#=
+
 function mygeqrf!(A, Tau, nbtiles)
     for k in 1:(nbtiles-1)
         QR1!(A,Tau, k)
@@ -290,4 +276,3 @@ function mygeqrf!(A, Tau, nbtiles)
     QR1!(A,Tau, nbtiles)
     return A
 end
-=#
